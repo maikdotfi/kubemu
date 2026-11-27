@@ -27,7 +27,21 @@ description = "Build and vet the Go oracle harness"
 dir = "testing/oracle-go"
 run = ["go vet ./...", "go test ./..."]
 
+[tasks.oracle-build]
+description = "Build the Go oracle binary to target/oracle-go"
+dir = "testing/oracle-go"
+run = "go build -o ../../target/oracle-go ."
+
+[tasks.fuzz]
+description = "Differential fuzz vs the Go oracle: mise run fuzz -- --cases 100000"
+depends = ["oracle-build"]
+run = "cargo run -q --release -p kubemu-oracle-fuzz -- --oracle target/oracle-go"
+
+[tasks.pins]
+description = "Check that all Kubernetes pins target one minor (ADR 0007)"
+run = "scripts/check-k8s-pins.sh"
+
 [tasks.ci]
 description = "Everything the PR pipeline runs locally"
-depends = ["lint", "test", "oracle"]
+depends = ["lint", "test", "oracle", "pins", "fuzz"]
 run = "cargo run -q -p kubemu-sim -- --seeds 1000 --check-determinism"

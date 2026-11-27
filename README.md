@@ -2,13 +2,14 @@
 
 > **kubemu** (pronounced *kube emu*) is a single Rust binary that emulates enough of Kubernetes to deploy and test real workloads (app, database, ingress, operators) across multiple clusters, in CI or locally. It uses a fraction of the resources of kind/k3s, and seeded fault injection is a first-class feature.
 
-> **Status: scaffold, M0 ready to start.** The workspace, `Env` traits (clock + RNG), a basic versioned store with watch, the determinism lints and a store-only DST harness exist. Everything else is a placeholder crate. The ADRs M0 needs (0001, 0002, 0007, 0008) are accepted; see §14.
+> **Status: M0 done, M1 next.** In place: `Env` traits (clock + RNG), the determinism lints, an `imbl`-backed store with watch and O(1) cluster fork, a seeded fault schedule for the store fault points, a DST harness (forks, watch faults, 1000 seeds, determinism check) and a Go oracle (merge, JSON patch and SMP via the apiserver's own code) with the first differential fuzz green on merge patch. Everything else is a placeholder crate. See §14 for ADR status.
 
 **Developing**
 ```sh
 mise install            # Go (oracle), kubectl, helm, kind. Rust comes from rust-toolchain.toml via rustup.
-mise run ci             # fmt, clippy (incl. determinism lints), tests, Go oracle, 1000-seed DST sweep
+mise run ci             # fmt, clippy (incl. determinism lints), tests, k8s pins, Go oracle, differential fuzz, 1000-seed DST sweep
 mise run sim -- --seed 42                 # replay a single seed
+mise run fuzz -- --seed 7 --cases 1       # replay a single differential-fuzz case
 cargo run -p kubemu-cli -- help           # the kubemu binary
 ```
 Design decisions go in [`docs/adr/`](docs/adr/).
@@ -91,6 +92,7 @@ crates/
 testing/
   sim/                  # DST harness, seed runners, invariants
   oracle-go/            # Go harness: SMP/SSA/validation oracle, trace recorder
+  oracle-fuzz/          # Rust side of differential fuzzing against oracle-go
   corpus/               # Helm charts, operators, golden tests
   conformance/          # skip lists, result tracking
   bench/                # resource and latency benchmarks

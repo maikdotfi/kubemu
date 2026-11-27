@@ -1,18 +1,18 @@
 // Command oracle-go answers kubemu's differential-fuzzing questions using real
-// Kubernetes Go code (README §1.4, §10).
+// Kubernetes Go code (README §1.4, §10), pinned to the target minor (ADR 0007).
 //
 // Protocol: one JSON request per line on stdin, one JSON response per line on
 // stdout. The Rust fuzzers spawn this process and diff its answers against
 // kubemu's.
 //
-// Planned ops (k8s.io/apimachinery and sigs.k8s.io/structured-merge-diff get
-// pinned to the version chosen in ADR 0007):
+// Each op calls the same function the apiserver's PATCH handler calls
+// (k8s.io/apiserver/pkg/endpoints/handlers/patch.go):
 //
-//	smp        strategic merge patch
-//	jsonpatch  RFC 6902 JSON patch
-//	merge      RFC 7386 merge patch
-//	ssa        server-side apply with managed fields
-//	validate   built-in validation and defaulting
+//	merge      RFC 7386 merge patch    gopkg.in/evanphx/json-patch.v4 MergePatch
+//	jsonpatch  RFC 6902 JSON patch     gopkg.in/evanphx/json-patch.v4 DecodePatch + Apply
+//	smp        strategic merge patch   strategicpatch.StrategicMergeMapPatch
+//
+// Planned: ssa (structured-merge-diff), validate (validation and defaulting).
 package main
 
 import (
@@ -20,6 +20,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	jsonpatch "gopkg.in/evanphx/json-patch.v4"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
+	"k8s.io/client-go/kubernetes/scheme"
+	kjson "sigs.k8s.io/json"
 )
 
 type Request struct {
@@ -32,19 +38,83 @@ type Response struct {
 	Error  string          `json:"error,omitempty"`
 }
 
+// patchPayload is the input of merge, jsonpatch and smp. APIVersion and Kind
+// pick the Go type whose struct tags drive SMP; the other ops ignore them.
+type patchPayload struct {
+	APIVersion string          `json:"apiVersion,omitempty"`
+	Kind       string          `json:"kind,omitempty"`
+	Original   json.RawMessage `json:"original"`
+	Patch      json.RawMessage `json:"patch"`
+}
+
 func handle(req Request) Response {
 	switch req.Op {
 	case "ping":
 		return Response{Result: json.RawMessage(`"pong"`)}
+	case "merge":
+		return withPayload(req, func(p patchPayload) ([]byte, error) {
+			return jsonpatch.MergePatch(p.Original, p.Patch)
+		})
+	case "jsonpatch":
+		return withPayload(req, func(p patchPayload) ([]byte, error) {
+			ops, err := jsonpatch.DecodePatch(p.Patch)
+			if err != nil {
+				return nil, err
+			}
+			return ops.Apply(p.Original)
+		})
+	case "smp":
+		return withPayload(req, smp)
 	default:
 		return Response{Error: fmt.Sprintf("op %q not implemented", req.Op)}
 	}
 }
 
+func withPayload(req Request, f func(patchPayload) ([]byte, error)) Response {
+	var p patchPayload
+	if err := json.Unmarshal(req.Payload, &p); err != nil {
+		return Response{Error: "bad payload: " + err.Error()}
+	}
+	out, err := f(p)
+	if err != nil {
+		return Response{Error: err.Error()}
+	}
+	return Response{Result: out}
+}
+
+// smp mirrors strategicPatchObject: both sides decoded as the apiserver
+// decodes them (case-sensitive, ints preserved), then patched as maps. The
+// result is not round-tripped through the typed object; that is decoding,
+// a separate concern from patch semantics.
+func smp(p patchPayload) ([]byte, error) {
+	gv, err := schema.ParseGroupVersion(p.APIVersion)
+	if err != nil {
+		return nil, err
+	}
+	ref, err := scheme.Scheme.New(gv.WithKind(p.Kind))
+	if err != nil {
+		return nil, err
+	}
+	original := map[string]any{}
+	if err := kjson.UnmarshalCaseSensitivePreserveInts(p.Original, &original); err != nil {
+		return nil, err
+	}
+	patch := map[string]any{}
+	if err := kjson.UnmarshalCaseSensitivePreserveInts(p.Patch, &patch); err != nil {
+		return nil, err
+	}
+	out, err := strategicpatch.StrategicMergeMapPatch(original, patch, ref)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(out)
+}
+
 func main() {
 	in := bufio.NewScanner(os.Stdin)
 	in.Buffer(make([]byte, 0, 1<<20), 64<<20)
-	out := json.NewEncoder(os.Stdout)
+	out := bufio.NewWriter(os.Stdout)
+	enc := json.NewEncoder(out)
 	for in.Scan() {
 		var req Request
 		resp := Response{}
@@ -53,7 +123,12 @@ func main() {
 		} else {
 			resp = handle(req)
 		}
-		if err := out.Encode(resp); err != nil {
+		if err := enc.Encode(resp); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		// Flush per response: the client waits for each answer.
+		if err := out.Flush(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}

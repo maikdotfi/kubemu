@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "testing/sim"]
-default-members = ["crates/*", "testing/sim"]
+members = ["crates/*", "testing/sim", "testing/oracle-fuzz"]
+default-members = ["crates/*", "testing/sim", "testing/oracle-fuzz"]
 
 [workspace.package]
 version = "0.0.0"
@@ -15,11 +15,14 @@ publish = false
 # Add internal crates here as they gain a dependent.
 kubemu-env = { path = "crates/kubemu-env" }
 kubemu-env-sim = { path = "crates/kubemu-env-sim" }
+kubemu-env-real = { path = "crates/kubemu-env-real" }
 kubemu-faults = { path = "crates/kubemu-faults" }
+kubemu-patch = { path = "crates/kubemu-patch" }
 kubemu-store = { path = "crates/kubemu-store" }
 
 # External. Pinned in Cargo.lock; add here only when code uses them.
 imbl = "7.0.2"
+serde_json = "1.0.154"
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 
 [workspace.lints.rust]

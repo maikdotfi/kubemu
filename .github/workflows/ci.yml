@@ -34,13 +34,18 @@ jobs:
 
   oracle-go:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: testing/oracle-go
     steps:
       - uses: actions/checkout@v5
       - uses: jdx/mise-action@v3
         with:
           install_args: go
-      - run: go vet ./...
-      - run: go test ./...
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: k8s pins agree (ADR 0007)
+        run: scripts/check-k8s-pins.sh
+      - name: go vet + test
+        working-directory: testing/oracle-go
+        run: go vet ./... && go test ./...
+      - name: differential fuzz vs Go oracle
+        run: mise run fuzz -- --cases 10000

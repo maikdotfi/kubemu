@@ -79,3 +79,17 @@ pub fn real_env(seed: Option<u64>) -> (Env, u64) {
         seed,
     )
 }
+
+/// Spawns `program` with piped stdin and stdout and inherited stderr. All
+/// process creation goes through this crate (ADR 0001); callers only use the
+/// handles they are given.
+pub fn spawn_piped(
+    program: &std::path::Path,
+    args: &[&str],
+) -> std::io::Result<std::process::Child> {
+    std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+}
