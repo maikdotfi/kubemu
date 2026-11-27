@@ -9,3 +9,9 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+kubemu-env.workspace = true
+
+[dev-dependencies]
+kubemu-env-sim.workspace = true

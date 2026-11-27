@@ -2,15 +2,17 @@
 //! under a seeded [`SimEnv`], checks invariants continuously, and records a
 //! trace whose hash must be identical for identical seeds.
 //!
-//! Today it exercises only the store: random writers on several clusters and
-//! lagging watchers that mirror state from the event stream (relisting on
-//! 410 Gone). Controllers, the API server and faults plug in as they land.
+//! Today it exercises the store and the store fault points: random writers
+//! on several clusters, clusters forked mid-run, and lagging watchers that
+//! mirror state from the event stream under injected watch drops and 410s
+//! (relisting on Gone). Controllers and the API server plug in as they land.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::time::Duration;
 
 use kubemu_env_sim::SimEnv;
+use kubemu_faults::{Fault, FaultConfig, FaultSchedule};
 use kubemu_store::{ClusterStore, EventKind, ObjectKey, ResourceVersion, Store, StoreError};
 
 pub const CLUSTERS: [&str; 3] = ["alpha", "beta", "gamma"];
@@ -20,6 +22,9 @@ pub struct Config {
     pub steps: u32,
     pub log_capacity: usize,
     pub keys_per_cluster: u64,
+    /// Forks stop once this many clusters exist.
+    pub max_clusters: usize,
+    pub faults: FaultConfig,
 }
 
 impl Default for Config {
@@ -28,6 +33,8 @@ impl Default for Config {
             steps: 500,
             log_capacity: 32,
             keys_per_cluster: 16,
+            max_clusters: 6,
+            faults: FaultConfig::default(),
         }
     }
 }
@@ -37,6 +44,8 @@ pub struct Outcome {
     pub seed: u64,
     pub trace_hash: u64,
     pub trace_lines: usize,
+    pub faults: usize,
+    pub forks: u32,
     pub violations: Vec<String>,
 }
 
@@ -47,7 +56,7 @@ impl Outcome {
 }
 
 /// A client-side mirror fed by watch events, like a client-go informer.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct Watcher {
     cursor: ResourceVersion,
     mirror: BTreeMap<ObjectKey, (ResourceVersion, u64)>,
@@ -66,29 +75,44 @@ impl Watcher {
         self.relists += 1;
     }
 
-    fn sync(&mut self, s: &ClusterStore<u64>, violations: &mut Vec<String>, cluster: &str) {
-        match s.events_since(self.cursor) {
-            Ok(events) => {
-                for e in events {
-                    if e.resource_version <= self.cursor {
-                        violations.push(format!(
-                            "{cluster}: non-monotonic rv {} after {}",
-                            e.resource_version, self.cursor
-                        ));
-                    }
-                    self.cursor = e.resource_version;
-                    match e.kind {
-                        EventKind::Added | EventKind::Modified => {
-                            self.mirror.insert(e.key, (e.resource_version, e.value));
-                        }
-                        EventKind::Deleted => {
-                            self.mirror.remove(&e.key);
-                        }
-                    }
+    /// Reads pending events. With `faults`, the read may be cut short or
+    /// answered with 410 Gone.
+    fn sync(
+        &mut self,
+        s: &ClusterStore<u64>,
+        faults: Option<&mut FaultSchedule>,
+        cluster: &str,
+        violations: &mut Vec<String>,
+    ) {
+        let events = match s.events_since(self.cursor) {
+            Ok(events) => events,
+            Err(StoreError::Gone { .. }) => return self.relist(s),
+            Err(other) => {
+                return violations.push(format!("{cluster}: unexpected watch error {other}"));
+            }
+        };
+        let deliver = match faults.and_then(|f| f.on_watch(cluster, events.len())) {
+            Some(Fault::WatchGone) => return self.relist(s),
+            Some(Fault::WatchDrop { deliver }) => deliver,
+            None => events.len(),
+        };
+        for e in events.into_iter().take(deliver) {
+            // Every write is one event, so a gap means a lost event.
+            if e.resource_version != self.cursor + 1 {
+                violations.push(format!(
+                    "{cluster}: watch skipped from rv {} to {}",
+                    self.cursor, e.resource_version
+                ));
+            }
+            self.cursor = e.resource_version;
+            match e.kind {
+                EventKind::Added | EventKind::Modified => {
+                    self.mirror.insert(e.key, (e.resource_version, e.value));
+                }
+                EventKind::Deleted => {
+                    self.mirror.remove(&e.key);
                 }
             }
-            Err(StoreError::Gone { .. }) => self.relist(s),
-            Err(other) => violations.push(format!("{cluster}: unexpected watch error {other}")),
         }
     }
 }
@@ -96,58 +120,83 @@ impl Watcher {
 pub fn run(seed: u64, cfg: &Config) -> Outcome {
     let sim = SimEnv::new(seed);
     let rng = sim.env.rng.clone();
+    let mut faults = FaultSchedule::new(sim.env.clone(), cfg.faults.clone());
     let mut store: Store<u64> = Store::new();
-    let mut watchers: BTreeMap<&str, Watcher> = BTreeMap::new();
+    let mut watchers: BTreeMap<String, Watcher> = BTreeMap::new();
     for c in CLUSTERS {
         *store.add_cluster(c) = ClusterStore::new(cfg.log_capacity);
-        watchers.insert(c, Watcher::default());
+        watchers.insert(c.to_owned(), Watcher::default());
     }
+    let mut forks = 0u32;
 
     let mut trace = String::new();
     let mut violations = Vec::new();
 
     for step in 0..cfg.steps {
         sim.clock.advance(Duration::from_millis(rng.below(50)));
-        let cluster = CLUSTERS[rng.below(CLUSTERS.len() as u64) as usize];
-        let s = store.cluster_mut(cluster).expect("cluster exists");
+        // `watchers` has the same keys as the store, in the same order.
+        let names: Vec<String> = watchers.keys().cloned().collect();
+        let cluster = names[rng.below(names.len() as u64) as usize].as_str();
         let key = ObjectKey::new(
             "configmaps",
             "default",
             format!("cm-{}", rng.below(cfg.keys_per_cluster)),
         );
         let value = rng.next_u64();
+        let faults_before = faults.injected().len();
 
-        let result = match rng.below(10) {
-            0..=3 => s
-                .create(key.clone(), value)
-                .map(|rv| format!("create rv={rv}")),
-            4..=6 => {
+        let result = match rng.below(20) {
+            0..=7 => store
+                .cluster_mut(cluster)
+                .and_then(|s| s.create(key.clone(), value))
+                .map(|rv| format!("create {key} rv={rv}")),
+            8..=13 => store.cluster_mut(cluster).and_then(|s| {
                 // Sometimes send a stale resourceVersion to exercise conflicts.
                 let expected = s
                     .get(&key)
                     .map(|o| o.resource_version - u64::from(rng.chance(0.2)));
                 s.update(&key, value, expected)
-                    .map(|rv| format!("update rv={rv}"))
+                    .map(|rv| format!("update {key} rv={rv}"))
+            }),
+            14..=16 => store
+                .cluster_mut(cluster)
+                .and_then(|s| s.delete(&key, None))
+                .map(|o| format!("delete {key} was={}", o.resource_version)),
+            17 if names.len() < cfg.max_clusters => {
+                forks += 1;
+                let to = format!("{cluster}.{forks}");
+                store.fork(cluster, to.clone()).map(|s| {
+                    // The fork's informer resumes from the parent's cursor.
+                    let w = watchers[cluster].clone();
+                    let out = format!(
+                        "fork -> {to} rv={} cursor={}",
+                        s.resource_version(),
+                        w.cursor
+                    );
+                    watchers.insert(to, w);
+                    out
+                })
             }
-            7..=8 => s
-                .delete(&key, None)
-                .map(|o| format!("delete was={}", o.resource_version)),
             _ => {
+                let s = store.cluster(cluster).expect("cluster exists");
                 let w = watchers.get_mut(cluster).expect("watcher exists");
-                w.sync(s, &mut violations, cluster);
+                w.sync(s, Some(&mut faults), cluster, &mut violations);
                 Ok(format!("sync cursor={} relists={}", w.cursor, w.relists))
             }
         };
         let now = sim.env.clock.now().0;
+        for f in &faults.injected()[faults_before..] {
+            let _ = writeln!(trace, "{step} {f}");
+        }
         let outcome = result.unwrap_or_else(|e| format!("err {e}"));
-        let _ = writeln!(trace, "{step} t={now} {cluster} {key} {outcome}");
+        let _ = writeln!(trace, "{step} t={now} {cluster} {outcome}");
     }
 
-    // Invariant: after catching up, every watcher mirrors its store exactly.
-    for c in CLUSTERS {
+    // Invariant: after catching up without faults, every watcher mirrors its
+    // store exactly.
+    for (c, w) in &mut watchers {
         let s = store.cluster(c).expect("cluster exists");
-        let w = watchers.get_mut(c).expect("watcher exists");
-        w.sync(s, &mut violations, c);
+        w.sync(s, None, c, &mut violations);
         let truth: BTreeMap<_, _> = s
             .list("configmaps", None)
             .0
@@ -165,11 +214,19 @@ pub fn run(seed: u64, cfg: &Config) -> Outcome {
             w.relists
         );
     }
+    if !store
+        .cluster_names()
+        .eq(watchers.keys().map(String::as_str))
+    {
+        violations.push("store clusters and watchers diverged".into());
+    }
 
     Outcome {
         seed,
         trace_hash: fnv1a(trace.as_bytes()),
         trace_lines: trace.lines().count(),
+        faults: faults.injected().len(),
+        forks,
         violations,
     }
 }
@@ -195,6 +252,19 @@ mod tests {
                 "seed {seed}"
             );
         }
+    }
+
+    #[test]
+    fn forks_and_faults_happen() {
+        let cfg = Config::default();
+        let o = run(0, &cfg);
+        assert!(o.faults > 0, "default config should inject faults");
+        assert!(o.forks > 0, "default config should fork clusters");
+        let quiet = Config {
+            faults: FaultConfig::NONE,
+            ..Config::default()
+        };
+        assert_eq!(run(0, &quiet).faults, 0);
     }
 
     #[test]

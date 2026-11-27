@@ -1,16 +1,22 @@
-//! Versioned in-memory object store (README §2.2).
+//! Versioned in-memory object store (README §2.2, ADR 0002).
 //!
 //! One [`Store`] holds every emulated cluster as a tenant; each tenant is a
 //! [`ClusterStore`] with its own resourceVersion sequence, like one etcd per
-//! cluster. Watches read from a bounded event log; asking for history that
-//! has been compacted away yields [`StoreError::Gone`] (HTTP 410).
+//! cluster. Watches are pull-based cursors over a bounded event log; asking
+//! for history that has been compacted away yields [`StoreError::Gone`]
+//! (HTTP 410).
 //!
-//! Not yet: field/label indexes, finalizers, ownerReferences, bookmarks and
-//! O(1) snapshots via persistent maps (ADR 0002).
+//! Objects and the log are persistent `imbl` structures, so
+//! [`Store::fork`] is O(1): parent and fork share structure and diverge
+//! lazily. A fork keeps the parent's history, so watchers can resume on it.
+//!
+//! Not yet: label/field indexes, finalizers, ownerReferences, bookmarks
+//! (they need object metadata, M1).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::fmt;
 
+use imbl::{OrdMap, Vector};
 pub type ResourceVersion = u64;
 
 /// Identifies an object inside one cluster. `namespace` is empty for
@@ -83,6 +89,7 @@ pub enum StoreError {
         oldest: ResourceVersion,
     },
     UnknownCluster(String),
+    ClusterExists(String),
 }
 
 impl fmt::Display for StoreError {
@@ -107,6 +114,7 @@ impl fmt::Display for StoreError {
                 )
             }
             Self::UnknownCluster(c) => write!(f, "unknown cluster {c:?}"),
+            Self::ClusterExists(c) => write!(f, "cluster {c:?} already exists"),
         }
     }
 }
@@ -115,21 +123,23 @@ impl std::error::Error for StoreError {}
 
 pub type Result<T> = std::result::Result<T, StoreError>;
 
-/// One cluster's objects plus its event history.
+/// One cluster's objects plus its event history. `Clone` is O(1).
 #[derive(Clone, Debug)]
-pub struct ClusterStore<V> {
-    objects: BTreeMap<ObjectKey, Object<V>>,
+pub struct ClusterStore<V: Clone> {
+    objects: OrdMap<ObjectKey, Object<V>>,
     rv: ResourceVersion,
-    log: VecDeque<Event<V>>,
+    /// Every write appends exactly one event, so retained resourceVersions
+    /// are contiguous: `log[i].resource_version == log[0].resource_version + i`.
+    log: Vector<Event<V>>,
     log_capacity: usize,
 }
 
 impl<V: Clone> ClusterStore<V> {
     pub fn new(log_capacity: usize) -> Self {
         Self {
-            objects: BTreeMap::new(),
+            objects: OrdMap::new(),
             rv: 0,
-            log: VecDeque::new(),
+            log: Vector::new(),
             log_capacity: log_capacity.max(1),
         }
     }
@@ -152,15 +162,19 @@ impl<V: Clone> ClusterStore<V> {
 
     /// Lists a resource, optionally within one namespace, in key order,
     /// together with the store resourceVersion the list is consistent at.
+    /// Keys sort by (resource, namespace, name), so this is a range scan.
     pub fn list(
         &self,
         resource: &str,
         namespace: Option<&str>,
     ) -> (Vec<(&ObjectKey, &Object<V>)>, ResourceVersion) {
+        let from = ObjectKey::new(resource, namespace.unwrap_or(""), "");
         let items = self
             .objects
-            .iter()
-            .filter(|(k, _)| k.resource == resource && namespace.is_none_or(|ns| k.namespace == ns))
+            .range(from..)
+            .take_while(|(k, _)| {
+                k.resource == resource && namespace.is_none_or(|ns| k.namespace == ns)
+            })
             .collect();
         (items, self.rv)
     }
@@ -226,12 +240,13 @@ impl<V: Clone> ClusterStore<V> {
                 oldest,
             });
         }
-        Ok(self
-            .log
-            .iter()
-            .filter(|e| e.resource_version > since)
-            .cloned()
-            .collect())
+        let skip = usize::try_from(since - oldest).expect("log index fits usize");
+        Ok(self.log.iter().skip(skip).cloned().collect())
+    }
+
+    /// The oldest resourceVersion a watch can still resume from.
+    pub fn oldest_resumable(&self) -> ResourceVersion {
+        self.log.front().map_or(self.rv, |e| e.resource_version - 1)
     }
 
     fn check(&self, key: &ObjectKey, expected: Option<ResourceVersion>) -> Result<ResourceVersion> {
@@ -275,7 +290,7 @@ impl<V: Clone> ClusterStore<V> {
 
 /// All clusters, keyed by name (deterministic iteration order).
 #[derive(Clone, Debug, Default)]
-pub struct Store<V> {
+pub struct Store<V: Clone> {
     clusters: BTreeMap<String, ClusterStore<V>>,
 }
 
@@ -293,6 +308,18 @@ impl<V: Clone> Store<V> {
         self.clusters
             .entry(name.into())
             .or_insert_with(|| ClusterStore::new(Self::DEFAULT_LOG_CAPACITY))
+    }
+
+    /// Copies cluster `from` into a new cluster `to` in O(1). Objects, the
+    /// resourceVersion and the retained event history are shared; writes to
+    /// either side are never visible on the other.
+    pub fn fork(&mut self, from: &str, to: impl Into<String>) -> Result<&mut ClusterStore<V>> {
+        let to = to.into();
+        if self.clusters.contains_key(&to) {
+            return Err(StoreError::ClusterExists(to));
+        }
+        let forked = self.cluster(from)?.clone();
+        Ok(self.clusters.entry(to).or_insert(forked))
     }
 
     pub fn remove_cluster(&mut self, name: &str) -> Option<ClusterStore<V>> {
@@ -384,5 +411,152 @@ mod tests {
             st.cluster("nope"),
             Err(StoreError::UnknownCluster(_))
         ));
+    }
+
+    #[test]
+    fn fork_shares_history_and_diverges() {
+        let mut st: Store<u8> = Store::new();
+        let a = st.add_cluster("a");
+        a.create(cm("x"), 1).unwrap();
+        a.create(cm("y"), 2).unwrap();
+        let f = st.fork("a", "f").unwrap();
+        // History is shared: a watcher from before the fork resumes on it.
+        assert_eq!(f.events_since(0).unwrap().len(), 2);
+        f.update(&cm("x"), 9, None).unwrap();
+        f.create(cm("z"), 3).unwrap();
+        st.cluster_mut("a").unwrap().delete(&cm("y"), None).unwrap();
+
+        let a = st.cluster("a").unwrap();
+        let f = st.cluster("f").unwrap();
+        assert_eq!(a.get(&cm("x")).unwrap().value, 1);
+        assert!(a.get(&cm("y")).is_none() && a.get(&cm("z")).is_none());
+        assert_eq!(f.get(&cm("x")).unwrap().value, 9);
+        assert!(f.get(&cm("y")).is_some());
+        // Same rv sequence from the fork point on, different events.
+        assert_eq!(a.resource_version(), 3);
+        assert_eq!(f.resource_version(), 4);
+        assert_eq!(a.events_since(2).unwrap()[0].kind, EventKind::Deleted);
+        assert_eq!(f.events_since(2).unwrap()[0].kind, EventKind::Modified);
+
+        assert_eq!(
+            st.fork("a", "f").err(),
+            Some(StoreError::ClusterExists("f".into()))
+        );
+        assert!(matches!(
+            st.fork("nope", "g"),
+            Err(StoreError::UnknownCluster(_))
+        ));
+    }
+
+    mod prop {
+        use super::*;
+        use proptest::prelude::*;
+        use proptest::test_runner::RngSeed;
+
+        #[derive(Clone, Debug)]
+        enum Op {
+            Create(u8, u8),
+            Update(u8, u8),
+            Delete(u8),
+        }
+
+        fn op() -> impl Strategy<Value = Op> {
+            prop_oneof![
+                (0..8u8, any::<u8>()).prop_map(|(k, v)| Op::Create(k, v)),
+                (0..8u8, any::<u8>()).prop_map(|(k, v)| Op::Update(k, v)),
+                (0..8u8).prop_map(Op::Delete),
+            ]
+        }
+
+        type Model = BTreeMap<ObjectKey, u8>;
+
+        fn apply(s: &mut ClusterStore<u8>, m: &mut Model, op: &Op) {
+            let key = |k: &u8| cm(&k.to_string());
+            match op {
+                Op::Create(k, v) => {
+                    if s.create(key(k), *v).is_ok() {
+                        m.insert(key(k), *v);
+                    }
+                }
+                Op::Update(k, v) => {
+                    if s.update(&key(k), *v, None).is_ok() {
+                        m.insert(key(k), *v);
+                    }
+                }
+                Op::Delete(k) => {
+                    if s.delete(&key(k), None).is_ok() {
+                        m.remove(&key(k));
+                    }
+                }
+            }
+        }
+
+        fn contents(s: &ClusterStore<u8>) -> Model {
+            s.list("configmaps", None)
+                .0
+                .into_iter()
+                .map(|(k, o)| (k.clone(), o.value))
+                .collect()
+        }
+
+        proptest! {
+            // Fixed seed: the property run is reproducible like everything else.
+            #![proptest_config(ProptestConfig {
+                cases: 512,
+                rng_seed: RngSeed::Fixed(0x6b75_6265_6d75),
+                failure_persistence: None,
+                ..ProptestConfig::default()
+            })]
+
+            /// ADR 0002: a mutation on a fork is never visible in the parent,
+            /// and the other way round. Both sides behave like independent
+            /// copies taken at the fork point.
+            #[test]
+            fn fork_is_isolated(
+                before in proptest::collection::vec(op(), 0..40),
+                ops in proptest::collection::vec((any::<bool>(), op()), 0..80),
+                cap in 1usize..20,
+            ) {
+                let mut st: Store<u8> = Store::new();
+                *st.add_cluster("p") = ClusterStore::new(cap);
+                let mut parent = Model::new();
+                for o in &before {
+                    apply(st.cluster_mut("p").unwrap(), &mut parent, o);
+                }
+                let fork_rv = st.cluster("p").unwrap().resource_version();
+                st.fork("p", "f").unwrap();
+                let at_fork = parent.clone();
+                let mut fork = parent.clone();
+
+                for (on_fork, o) in &ops {
+                    if *on_fork {
+                        apply(st.cluster_mut("f").unwrap(), &mut fork, o);
+                    } else {
+                        apply(st.cluster_mut("p").unwrap(), &mut parent, o);
+                    }
+                }
+
+                for (name, model) in [("p", &parent), ("f", &fork)] {
+                    let s = st.cluster(name).unwrap();
+                    prop_assert_eq!(&contents(s), model);
+                    // Replaying a side's own events on top of the fork point
+                    // reproduces it, while that history is still retained.
+                    if let Ok(events) = s.events_since(fork_rv) {
+                        let mut m = at_fork.clone();
+                        let mut rv = fork_rv;
+                        for e in events {
+                            prop_assert_eq!(e.resource_version, rv + 1);
+                            rv = e.resource_version;
+                            match e.kind {
+                                EventKind::Deleted => { m.remove(&e.key); }
+                                _ => { m.insert(e.key, e.value); }
+                            }
+                        }
+                        prop_assert_eq!(&m, model);
+                        prop_assert_eq!(rv, s.resource_version());
+                    }
+                }
+            }
+        }
     }
 }
