@@ -22,4 +22,3 @@
 ## Git
 - plain `git push` works via `gh`
 - auth broken: `gh auth setup-git -h github.com`
-- workflow files need: `gh auth refresh -h github.com -s workflow`
