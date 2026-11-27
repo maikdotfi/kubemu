@@ -1,0 +1,11 @@
+[package]
+name = "kubemu-image"
+description = "Registry client, content-addressed layer store, EROFS/overlay assembly"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

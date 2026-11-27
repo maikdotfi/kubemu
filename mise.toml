@@ -1,0 +1,33 @@
+# Local dev environment. Rust is pinned separately via rust-toolchain.toml (rustup).
+[tools]
+go = "1.27.4"        # testing/oracle-go (Kubernetes Go code as oracle)
+kubectl = "1.37.3"   # smoke-testing the API server; keep in step with the k8s version policy (ADR 0007)
+helm = "4.3.2"       # corpus installs
+kind = "0.33.0"      # reference apiserver for trace-differential tests (needs Docker)
+
+[tasks.fmt]
+run = "cargo fmt --all"
+
+[tasks.lint]
+description = "fmt check + clippy (includes the determinism lints)"
+run = [
+  "cargo fmt --all -- --check",
+  "cargo clippy --workspace --all-targets -- -D warnings",
+]
+
+[tasks.test]
+run = "cargo test --workspace"
+
+[tasks.sim]
+description = "Run a DST seed sweep: mise run sim -- --seeds 1000"
+run = "cargo run -q -p kubemu-sim --"
+
+[tasks.oracle]
+description = "Build and vet the Go oracle harness"
+dir = "testing/oracle-go"
+run = ["go vet ./...", "go test ./..."]
+
+[tasks.ci]
+description = "Everything the PR pipeline runs locally"
+depends = ["lint", "test", "oracle"]
+run = "cargo run -q -p kubemu-sim -- --seeds 1000 --check-determinism"

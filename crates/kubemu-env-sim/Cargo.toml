@@ -1,0 +1,14 @@
+[package]
+name = "kubemu-env-sim"
+description = "Deterministic simulation Env implementations (virtual time, seeded RNG)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+kubemu-env.workspace = true

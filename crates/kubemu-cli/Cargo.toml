@@ -1,0 +1,15 @@
+[package]
+name = "kubemu-cli"
+description = "The kubemu binary"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "kubemu"
+path = "src/main.rs"

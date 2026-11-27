@@ -1,0 +1,31 @@
+# Determinism boundary (README §1.2, §3.1).
+# All nondeterminism goes through `kubemu_env::Env`. Only `kubemu-env-real` may
+# touch the real world; it opts out with a crate-level `#![allow(...)]`.
+# When adding tokio / rand / etc. as dependencies, extend these lists
+# (e.g. `tokio::spawn`, `tokio::time::sleep`, `rand::thread_rng`).
+
+disallowed-methods = [
+  { path = "std::time::Instant::now", reason = "use Env::clock" },
+  { path = "std::time::SystemTime::now", reason = "use Env::clock" },
+  { path = "std::thread::spawn", reason = "use Env tasks" },
+  { path = "std::thread::sleep", reason = "use Env tasks / virtual time" },
+  { path = "std::fs::read", reason = "use Env fs" },
+  { path = "std::fs::read_to_string", reason = "use Env fs" },
+  { path = "std::fs::write", reason = "use Env fs" },
+  { path = "std::fs::create_dir_all", reason = "use Env fs" },
+  { path = "std::fs::remove_file", reason = "use Env fs" },
+  { path = "std::fs::remove_dir_all", reason = "use Env fs" },
+  { path = "std::env::var", reason = "configuration must be explicit, not ambient" },
+]
+
+disallowed-types = [
+  { path = "std::collections::HashMap", reason = "iteration order is random; use BTreeMap or a deterministic hasher" },
+  { path = "std::collections::HashSet", reason = "iteration order is random; use BTreeSet or a deterministic hasher" },
+  { path = "std::collections::hash_map::RandomState", reason = "random seed; use a deterministic hasher" },
+  { path = "std::fs::File", reason = "use Env fs" },
+  { path = "std::fs::OpenOptions", reason = "use Env fs" },
+  { path = "std::net::TcpStream", reason = "use Env net" },
+  { path = "std::net::TcpListener", reason = "use Env net" },
+  { path = "std::net::UdpSocket", reason = "use Env net" },
+  { path = "std::process::Command", reason = "use Env spawn" },
+]

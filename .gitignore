@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+.DS_Store
+/.idea
+/.vscode
+# local kubemu state, traces and reports
+/.kubemu
+*.trace.json

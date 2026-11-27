@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  rust:
+    # Hosted runner for now; namespace/root-heavy jobs move to self-hosted
+    # sandboxed runners later (README §11, ADR 0008).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy (incl. determinism lints)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test
+        run: cargo test --workspace
+      - name: DST sweep + determinism check
+        run: cargo run --release -p kubemu-sim -- --seeds 1000 --check-determinism
+
+  oracle-go:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: testing/oracle-go
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v3
+        with:
+          install_args: go
+      - run: go vet ./...
+      - run: go test ./...

@@ -1,0 +1,11 @@
+[package]
+name = "kubemu-net"
+description = "IPAM, userspace service proxy, cluster DNS, NetworkPolicy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

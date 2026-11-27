@@ -1,0 +1,33 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "testing/sim"]
+default-members = ["crates/*", "testing/sim"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.100"
+repository = "https://github.com/maikdotfi/kubemu"
+publish = false
+# License: undecided, see docs/adr/0009-license-and-naming.md
+
+[workspace.dependencies]
+# Add internal crates here as they gain a dependent.
+kubemu-env = { path = "crates/kubemu-env" }
+kubemu-env-sim = { path = "crates/kubemu-env-sim" }
+kubemu-store = { path = "crates/kubemu-store" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+# Determinism boundary: see clippy.toml.
+disallowed_methods = "deny"
+disallowed_types = "deny"
+dbg_macro = "warn"
+todo = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
