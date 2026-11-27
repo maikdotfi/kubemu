@@ -1,6 +1,6 @@
 # 0013: Validation and defaulting
 
-- Status: Proposed
+- Status: Accepted (signed off by the project owner, 2026-11-27)
 - Date: 2026-11-27
 
 ## Context

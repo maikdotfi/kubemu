@@ -3,7 +3,7 @@
 | Dir | What | Status |
 |---|---|---|
 | `sim/` | DST harness (`kubemu-sim`): seeded runs, invariants, determinism check | store-only workload |
-| `oracle-go/` | Go oracle for differential fuzzing (SMP, SSA, validation) | protocol stub |
+| `oracle-go/` | Go oracle for differential fuzzing (SMP, SSA, validation) | merge, JSON patch, SMP |
 | `corpus/` | Helm charts, operators, golden install tests | empty |
 | `conformance/` | Upstream e2e skip lists and pass-rate tracking | empty |
 | `bench/` | Resource and latency budgets (README §4.4) | empty |

@@ -1,6 +1,6 @@
 # 0012: Source of schemas, discovery and OpenAPI
 
-- Status: Proposed
+- Status: Accepted (signed off by the project owner, 2026-11-27)
 - Date: 2026-11-27
 
 ## Context

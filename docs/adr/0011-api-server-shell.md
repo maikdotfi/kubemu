@@ -1,6 +1,6 @@
 # 0011: API server layering: synchronous frontend, thin HTTP shell
 
-- Status: Proposed
+- Status: Accepted (signed off by the project owner, 2026-11-27)
 - Date: 2026-11-27
 
 ## Context

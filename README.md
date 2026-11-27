@@ -2,7 +2,7 @@
 
 > **kubemu** (pronounced *kube emu*) is a single Rust binary that emulates enough of Kubernetes to deploy and test real workloads (app, database, ingress, operators) across multiple clusters, in CI or locally. It uses a fraction of the resources of kind/k3s, and seeded fault injection is a first-class feature.
 
-> **Status: M0 done, M1 next.** In place: `Env` traits (clock + RNG), the determinism lints, an `imbl`-backed store with watch and O(1) cluster fork, a seeded fault schedule for the store fault points, a DST harness (forks, watch faults, 1000 seeds, determinism check) and a Go oracle (merge, JSON patch and SMP via the apiserver's own code) with the first differential fuzz green on merge patch. Everything else is a placeholder crate. See §14 for ADR status.
+> **Status: M0 done, M1 ready to start.** In place: `Env` traits (clock + RNG), the determinism lints, an `imbl`-backed store with watch and O(1) cluster fork, a seeded fault schedule for the store fault points, a DST harness (forks, watch faults, 1000 seeds, determinism check) and a Go oracle (merge, JSON patch and SMP via the apiserver's own code) with the first differential fuzz green on merge patch. Everything else is a placeholder crate. All M1 ADRs (0010 to 0013) are accepted. **Next agent: start at §12.1, the M1 work plan.** See §14 for ADR status.
 
 **Developing**
 ```sh
@@ -294,6 +294,22 @@ Every failure found anywhere (DST, fuzzing, corpus) becomes a permanent regressi
 | **M6: Public alpha** | Docs, GitHub Action, helpers, published compatibility dashboard | External users run it in CI |
 | **Research tracks** | L2 workload determinism, rootless mode, lazy pulling, object-storage-backed snapshots and volumes | Spikes with ADRs |
 
+### 12.1 M1 work plan
+
+M1 follows ADRs [0010](docs/adr/0010-object-model-and-wire-format.md) (JSON objects, JSON-only wire), [0011](docs/adr/0011-api-server-shell.md) (synchronous `kubemu-api` frontend, thin tokio shell, plain HTTP, no auth, one cluster per listener), [0012](docs/adr/0012-schema-source.md) (vendored upstream OpenAPI as the single schema source) and [0013](docs/adr/0013-validation-and-defaulting.md) (validate and default only what users observe, oracle-checked). Read them first. Suggested order, each step landing green on `mise run ci`:
+
+1. **Schemas (`kubemu-api-types`).** A `mise` task fetches upstream `api/openapi-spec` at the v1.37.x tag and commits it under `crates/kubemu-api-types/openapi/`; extend `scripts/check-k8s-pins.sh` to cover the tag. Expose the T0 resource table (GVK, plural, scope, verbs, short names), the served v2/v3 documents filtered to T0, per-path SMP metadata, and schemas for pruning. Add `k8s-openapi` (feature `v1_37`) only when code uses it.
+2. **Patching (`kubemu-patch`).** JSON patch and SMP in Rust, SMP metadata read from step 1. The oracle already speaks `jsonpatch` and `smp`; extend `testing/oracle-fuzz` to fuzz both.
+3. **Frontend (`kubemu-api`, new core crate).** The store becomes `Store<serde_json::Value>`. Typed request and response, `Status` errors, and the pipeline: decode, built-in admission, defaulting and validation, pruning with `fieldValidation`, patch, store, encode. Plus: discovery (legacy and aggregated v2) and OpenAPI responses, list with label and field selectors, full resourceVersion semantics (`resourceVersion`/`resourceVersionMatch`, `limit`/`continue`), watch cursors with bookmarks and 410, `/status` subresource, finalizers and `deletionTimestamp`, `propagationPolicy`, `generateName`. UIDs (UUIDv4) and timestamps come from `Env`. Every request goes into the event trace.
+4. **DST through the frontend.** `testing/sim` clients call `kubemu-api` instead of the store. Keep the existing invariants and determinism check; add API-level ones (resourceVersion monotonic, no lost watch events, GC eventually consistent).
+5. **Controllers (`kubemu-controllers`)** as `reconcile -> Vec<Action>` (ADR 0001): garbage collector (ownerRefs; foreground, background, orphan), namespace lifecycle, default ServiceAccount per namespace, Endpoints/EndpointSlice from Services and Pods, a logical Node, and **`SimExecutor`**: the fake kubelet that moves scheduled pods to Running/Ready after a seeded delay. All run under DST.
+6. **HTTP shell (`kubemu-apiserver`) and the binary.** Tokio, hyper and axum arrive here and in `kubemu-cli` only. In the same commit: the tokio bans in `clippy.toml` and the CI check that core crates don't depend on tokio (ADR 0001); listener binding goes through `kubemu-env-real`. Core behind a `Mutex`, called inline; watches wait on a `Notify` and stream chunked JSON. Shell tests drive real HTTP against an in-memory core. CLI: `kubemu up` (one cluster) and `kubemu kubeconfig` (`server: http://127.0.0.1:<port>`).
+7. **Validation and defaulting (ADR 0013).** Add `validate`/`default` ops to `testing/oracle-go` for the T0 types; port only observable rules, each fuzzed against the oracle; list the rest in a compatibility report.
+8. **Exit criteria.**
+   - A kubectl smoke test in CI: `get`, `apply`, `delete`, `watch` against `kubemu up`.
+   - An informer harness (client-go 1.37) for list/watch/relist/bookmarks. It also settles ADR 0010's open check that client-go, kubectl and Helm work with JSON only.
+   - Budget baselines recorded in `testing/bench` (§4.4: idle RSS, empty-cluster-ready time, fork time).
+
 ---
 
 ## 13. Risks and mitigations
@@ -311,7 +327,7 @@ Every failure found anywhere (DST, fuzzing, corpus) becomes a permanent regressi
 ---
 
 ## 14. Decisions to write as ADRs first
-ADRs live in [`docs/adr/`](docs/adr/). **Every ADR that M0 needs is accepted.** The M1 ADRs (0010 to 0013) are written and waiting for sign-off. The others aren't written yet and need sign-off before their milestone starts.
+ADRs live in [`docs/adr/`](docs/adr/). **Every ADR that M0 and M1 need is accepted, so M1 can start.** The others aren't written yet and need sign-off before their milestone starts.
 
 | # | Decision | Status | Needed by |
 |---|---|---|---|
@@ -324,10 +340,10 @@ ADRs live in [`docs/adr/`](docs/adr/). **Every ADR that M0 needs is accepted.** 
 | [0007](docs/adr/0007-k8s-version-policy.md) | Kubernetes version policy: single target minor, **1.37** | **Accepted** | M0 |
 | [0008](docs/adr/0008-ci-forge.md) | CI forge: GitHub Actions; hosted runners now, self-hosted later | **Accepted** | M0 |
 | [0009](docs/adr/0009-license-and-naming.md) | License and naming (check that "kubemu" is free on crates.io and GitHub) | Proposed, not written | M6 |
-| [0010](docs/adr/0010-object-model-and-wire-format.md) | Object model: JSON values in the store, JSON-only wire format | Proposed | M1 |
-| [0011](docs/adr/0011-api-server-shell.md) | API server: synchronous `kubemu-api` frontend + thin tokio HTTP shell (Turso-style), plain HTTP, multi-cluster deferred | Proposed | M1 |
-| [0012](docs/adr/0012-schema-source.md) | Schemas, discovery and OpenAPI from vendored upstream `api/openapi-spec` | Proposed | M1 |
-| [0013](docs/adr/0013-validation-and-defaulting.md) | Validation and defaulting: port only what users observe, oracle-checked | Proposed | M1 |
+| [0010](docs/adr/0010-object-model-and-wire-format.md) | Object model: JSON values in the store, JSON-only wire format | **Accepted** | M1 |
+| [0011](docs/adr/0011-api-server-shell.md) | API server: synchronous `kubemu-api` frontend + thin tokio HTTP shell (Turso-style), plain HTTP, multi-cluster deferred | **Accepted** | M1 |
+| [0012](docs/adr/0012-schema-source.md) | Schemas, discovery and OpenAPI from vendored upstream `api/openapi-spec` | **Accepted** | M1 |
+| [0013](docs/adr/0013-validation-and-defaulting.md) | Validation and defaulting: port only what users observe, oracle-checked | **Accepted** | M1 |
 
 ---
 
