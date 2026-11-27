@@ -71,7 +71,7 @@ Design decisions go in [`docs/adr/`](docs/adr/).
 ### 2.3 Cargo workspace (initial)
 ```
 crates/
-  kubemu-env            # Env traits: Clock, Rng, Net, Fs, Spawn, Executor
+  kubemu-env            # Env traits: Clock, Rng, plus narrow effect traits as needed
   kubemu-env-real       # real implementations (tokio, syscalls)
   kubemu-env-sim        # deterministic simulation implementations
   kubemu-store          # versioned store + watch
@@ -101,11 +101,14 @@ testing/
 ## 3. Determinism and fault injection
 
 ### 3.1 The `Env` abstraction
-- Traits: `Clock` (monotonic + wall), `Rng`, `Net` (listen, connect, datagrams), `Fs`, `Spawn` (processes), `Tasks` (spawn/sleep/timeouts).
-- **Real mode** uses tokio and actual syscalls.
-- **Sim mode** uses a single-threaded deterministic executor (madsim/turmoil-style, or our own if they don't fit), virtual time, a seeded RNG and simulated network and filesystem.
+Design: a **synchronous deterministic core plus a tokio shell**, modelled on Turso ([ADR 0001](docs/adr/0001-sim-executor.md)).
+- **Core** crates (store, patch, controllers, scheduler, faults, snapshot) are plain synchronous state machines. They have no async runtime, take time and randomness only through `Env` (`Clock`, `Rng`), and return actions for a driver to carry out.
+- **Shell** crates (API server HTTP layer, proxies, DNS, pod runtime, images, data) run on **tokio**. They stay thin: parse, call the core, carry out its actions.
+- Narrow effect traits (files, a Turso `IO` adapter, ...) are added to `Env` only when a core crate needs them. There is no `Tasks`/executor trait.
+- **Sim mode** is the DST harness driving the core directly: a seeded loop picks which actor steps next, which faults fire and how far virtual time moves. No simulated runtime is needed.
 - **Enforcement:**
-  - `clippy.toml` `disallowed-methods`/`disallowed-types` bans `Instant::now`, `SystemTime::now`, `thread_rng`, `tokio::spawn`, `std::thread::spawn`, `std::net::*`, `std::fs::*` and `HashMap` with random state outside `kubemu-env-real`.
+  - `clippy.toml` `disallowed-methods`/`disallowed-types` bans `Instant::now`, `SystemTime::now`, `std::thread::spawn`, `std::net::*`, `std::fs::*`, `std::process::Command` and `HashMap` with random state outside `kubemu-env-real`. When tokio arrives, creating sockets, files and processes through tokio is banned the same way.
+  - Core crates must not depend on tokio or any async runtime (checked in CI).
   - Use deterministic hashers and ordered collections where iteration order leaks into behaviour.
   - CI runs a **determinism check**: the same seed run twice must produce byte-identical event traces.
 
@@ -305,7 +308,7 @@ Every failure found anywhere (DST, fuzzing, corpus) becomes a permanent regressi
 ---
 
 ## 14. Decisions to write as ADRs first
-1. Simulation executor: madsim vs turmoil vs custom.
+1. Determinism model: synchronous core + tokio shell (accepted, Turso-style).
 2. Store data structure for O(1) snapshot (persistent maps) and the watch cache design.
 3. Pod networking default: netns+veth vs the loopback+seccomp experimental mode.
 4. Rootful-first privilege model.

@@ -1,8 +1,10 @@
 # Determinism boundary (README §1.2, §3.1).
 # All nondeterminism goes through `kubemu_env::Env`. Only `kubemu-env-real` may
 # touch the real world; it opts out with a crate-level `#![allow(...)]`.
-# When adding tokio / rand / etc. as dependencies, extend these lists
-# (e.g. `tokio::spawn`, `tokio::time::sleep`, `rand::thread_rng`).
+# Core crates must not depend on tokio at all (ADR 0001). When tokio arrives
+# for the shell, ban creating real handles through it here
+# (`tokio::net::*::bind`/`connect`, `tokio::fs::*`, `tokio::process::*`),
+# and `rand::thread_rng` if rand is added.
 
 disallowed-methods = [
   { path = "std::time::Instant::now", reason = "use Env::clock" },

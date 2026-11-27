@@ -4,8 +4,9 @@
 //! `kubemu-env-real` is linted (see `clippy.toml`) so it cannot touch the
 //! real clock, RNG, filesystem, network or process table directly.
 //!
-//! Implemented so far: [`Clock`] and [`Rng`]. `Net`, `Fs`, `Spawn` and
-//! `Tasks` land with the simulation-executor decision (ADR 0001).
+//! Core crates are synchronous and runtime-free; tokio lives only in shell
+//! crates (ADR 0001). `Env` is [`Clock`] and [`Rng`] for now; narrow effect
+//! traits (files, a Turso `IO` adapter) are added when a core crate needs one.
 
 use std::fmt;
 use std::sync::Arc;
