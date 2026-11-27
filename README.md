@@ -78,7 +78,8 @@ crates/
   kubemu-store          # versioned store + watch
   kubemu-api-types      # wraps k8s-openapi, schema metadata, patch strategies
   kubemu-patch          # SMP, JSON patch, merge patch, SSA (managed fields)
-  kubemu-apiserver      # HTTP layer, discovery, admission, streaming
+  kubemu-api            # synchronous API frontend: request pipeline, discovery, admission (ADR 0011)
+  kubemu-apiserver      # thin tokio HTTP shell over kubemu-api, streaming
   kubemu-controllers
   kubemu-scheduler
   kubemu-runtime        # WorkloadExecutor trait + youki-based executor
@@ -310,7 +311,7 @@ Every failure found anywhere (DST, fuzzing, corpus) becomes a permanent regressi
 ---
 
 ## 14. Decisions to write as ADRs first
-ADRs live in [`docs/adr/`](docs/adr/). **Every ADR that M0 needs is accepted, so M0 can start.** The others aren't written yet and need sign-off before their milestone starts.
+ADRs live in [`docs/adr/`](docs/adr/). **Every ADR that M0 needs is accepted.** The M1 ADRs (0010 to 0013) are written and waiting for sign-off. The others aren't written yet and need sign-off before their milestone starts.
 
 | # | Decision | Status | Needed by |
 |---|---|---|---|
@@ -323,6 +324,10 @@ ADRs live in [`docs/adr/`](docs/adr/). **Every ADR that M0 needs is accepted, so
 | [0007](docs/adr/0007-k8s-version-policy.md) | Kubernetes version policy: single target minor, **1.37** | **Accepted** | M0 |
 | [0008](docs/adr/0008-ci-forge.md) | CI forge: GitHub Actions; hosted runners now, self-hosted later | **Accepted** | M0 |
 | [0009](docs/adr/0009-license-and-naming.md) | License and naming (check that "kubemu" is free on crates.io and GitHub) | Proposed, not written | M6 |
+| [0010](docs/adr/0010-object-model-and-wire-format.md) | Object model: JSON values in the store, JSON-only wire format | Proposed | M1 |
+| [0011](docs/adr/0011-api-server-shell.md) | API server: synchronous `kubemu-api` frontend + thin tokio HTTP shell (Turso-style), plain HTTP, multi-cluster deferred | Proposed | M1 |
+| [0012](docs/adr/0012-schema-source.md) | Schemas, discovery and OpenAPI from vendored upstream `api/openapi-spec` | Proposed | M1 |
+| [0013](docs/adr/0013-validation-and-defaulting.md) | Validation and defaulting: port only what users observe, oracle-checked | Proposed | M1 |
 
 ---
 
