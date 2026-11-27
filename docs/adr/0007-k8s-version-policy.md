@@ -1,6 +1,6 @@
 # 0007: Kubernetes version policy
 
-- Status: Proposed
+- Status: Accepted (signed off by the project owner, 2026-11-27)
 - Date: 2026-11-27
 
 ## Context
@@ -20,7 +20,7 @@ Facts as of 2026-11-27:
 
 ## Decision
 
-Proposed: **option 1, a single target minor, currently 1.37.**
+**Option 1: a single target minor, Kubernetes 1.37.**
 
 These are all pinned in lockstep:
 | Thing | Pin |

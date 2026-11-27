@@ -1,6 +1,6 @@
 # 0002: Store data structure and watch cache
 
-- Status: Proposed
+- Status: Accepted (signed off by the project owner, 2026-11-27)
 - Date: 2026-11-27
 
 ## Context
@@ -27,7 +27,7 @@ Watch cache:
 
 ## Decision
 
-Proposed: **`imbl::OrdMap` (option 1) with a per-cluster log (option a) for M0/M1.** Revisit (b) if the informer harness shows too many 410s.
+**`imbl::OrdMap` (option 1) with a per-cluster log (option a) for M0/M1.** Revisit (b) if the informer harness shows too many 410s.
 
 - `ClusterStore` holds `OrdMap<ObjectKey, Object<V>>`. Values are `Arc`-shared, so a fork copies a root pointer and diverges lazily.
 - The event log becomes a persistent vector (`imbl::Vector`), so a fork keeps its history and watchers on the fork can resume.
