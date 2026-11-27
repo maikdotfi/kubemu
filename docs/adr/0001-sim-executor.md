@@ -1,4 +1,4 @@
-# 0001: Simulation executor: madsim vs turmoil vs custom
+# 0001: Simulation executor: tokio in both modes
 
 - Status: Proposed
 - Date: 2026-11-27
@@ -7,48 +7,60 @@
 
 See README §3.1. The sim Env needs a single-threaded deterministic executor with virtual time, seeded RNG and simulated net/fs. This also decides the shape of the Tasks, Net and Fs traits in kubemu-env.
 
+Constraint (owner decision, 2026-11-27): **kubemu uses tokio.** No custom executor, and no build-time runtime swap.
+
 Forces:
-- Principle 1.2: nondeterminism goes through an injected `Env`, enforced by lints. Today `Env` is a struct of `Arc<dyn Trait>` handles (`Clock`, `Rng`).
-- One binary hosts many clusters, so real mode must also run on a normal multi-threaded runtime (tokio).
-- The API server needs HTTP/2 + TLS (hyper, rustls). hyper 1.x is runtime-agnostic: it needs `hyper::rt::{Read, Write, Executor, Timer}`, which we can implement on top of `Env`.
-- Faults are injected in our own code (API middleware, proxies, DNS, store), not by intercepting syscalls. The sim only has to control what kubemu itself does.
-- Add deps only when code uses them.
+- Principle 1.2: nondeterminism goes through `Env`, enforced by lints.
+- tokio's current-thread runtime is deterministic given deterministic inputs. It's FIFO with no work stealing, and in paused-time mode time only advances when every task is idle. The remaining sources of nondeterminism are:
+  1. real I/O (sockets, fs, processes, signals);
+  2. the blocking pool and the multi-thread scheduler;
+  3. the per-runtime RNG behind `select!` branch order;
+  4. ambient clocks and RNGs outside tokio.
 
 ## Options
 
-1. **madsim.** Swaps tokio and friends for simulated versions at build time (`--cfg madsim`, `madsim-tokio` and patched crates), and intercepts libc `clock_gettime`/`getrandom`.
-   - + Most complete out of the box: sim net, fs, time, multi-node, determinism self-check.
-   - − The whole dependency tree builds twice in two configs, and every networking crate we use needs a madsim-patched build or `[patch]` entries.
-   - − Determinism comes from the build config, not from `Env`, so it fights principle 1.2 rather than building on it. The lints and `Env` would become redundant in one mode and leaky in the other.
-   - − Small maintainer base; we'd be pinned to its tokio API subset.
-2. **turmoil.** Runs on tokio's current-thread runtime with paused time and simulates hosts plus TCP/UDP between them.
-   - + Simple and actively maintained (tokio-rs). Good network partition and latency tools.
-   - − Determinism is partial: tokio internals (`select!` fairness, the task scheduler) aren't seeded by us, and there's no sim fs or process model.
-   - − Code still calls tokio directly, which is what our lints ban. We'd wrap turmoil behind `Env` anyway.
-3. **Custom executor behind `Env`.** Add `Tasks`, `Net` and `Fs` traits to kubemu-env. Real mode implements them with tokio. Sim mode is a small single-threaded executor built on `async-task`: a seeded run queue (the RNG picks the next ready task), a timer wheel on `SimClock`, and in-memory net/fs that the fault engine can reach directly.
-   - + Matches the existing design: one seam (`Env`), enforced by lints, no build-config split.
-   - + We own scheduling order, so we can randomise it per seed (finds ordering bugs) and record it in the trace.
-   - + Fault injection for net/fs/time lives in the same code as the sim.
-   - − We write and maintain roughly 1–2k lines: executor, timers, in-memory streams, fs.
-   - − Every async dependency must go through our traits. hyper allows this; crates that hard-code tokio (some DNS and DB clients) need adapters or must stay in real-only code.
+1. **tokio + turmoil for sim networking.** turmoil runs simulated hosts on tokio and gives tokio-shaped `TcpStream`/`TcpListener`, partitions and latency.
+   - + Mature host and link model, tokio-rs maintained.
+   - − Brings its own host/address model and RNG. kubemu still needs its own addressing (cluster, pod IP, Service VIP) and wants faults driven by our `FaultSchedule`.
+2. **tokio + our own in-memory net behind `Env`.** The sim `Net` hands out `tokio::io::duplex` pairs routed through a small link table that the fault engine controls (drop, delay, reset, partition).
+   - + One fault model, one seed, addressing that matches ours.
+   - − We write the link model (small: connect/accept, datagrams, per-link faults).
+3. **madsim.** Rejected: it replaces tokio at build time, which conflicts with the constraint.
 
 ## Decision
 
-Proposed: **option 3, custom executor behind `Env`.** Steal ideas from turmoil (host and link model) and madsim (determinism self-check) without depending on them.
+Proposed: **tokio everywhere, with option 2 for sim networking.** We can revisit turmoil when `Net` lands in M1 if our link model grows beyond a few hundred lines.
 
-Trait shape:
-- `Tasks`: `spawn(name, fut) -> JoinHandle`, `sleep(Duration)`, `timeout(Duration, fut)`. Tasks are named, so traces stay readable.
-- `Net`: `listen(addr) -> Listener`, `connect(addr) -> Stream` (`AsyncRead + AsyncWrite`), `bind_udp(addr) -> Datagram`. Addresses are kubemu-level (cluster, host, port), not raw `SocketAddr`, so clusters can be partitioned.
-- `Fs`: a minimal async API (read, write, rename, remove, list, fsync), added only when the first crate needs it.
-- `Spawn` (OS processes): real-only for now. In sim, pods are `SimExecutor` objects (README §4.1), so the sim never forks.
+**Runtime**
+- Real mode: tokio multi-thread runtime, created only in kubemu-env-real / kubemu-cli.
+- Sim mode: `Builder::new_current_thread().enable_time().start_paused(true).rng_seed(RngSeed::from_bytes(&seed))`.
+  - `rng_seed` makes `select!` ordering seeded. It requires `--cfg tokio_unstable`, set workspace-wide in `.cargo/config.toml`.
+  - `start_paused` requires tokio's `test-util` feature. It's enabled only by kubemu-env-sim, and kubemu-cli must not depend on that crate, so the shipped binary doesn't get it.
 
-The trait objects stay `Send + Sync` so real mode runs on multi-threaded tokio. The sim executor runs everything on one thread anyway.
+**What code may use directly** (deterministic under the sim runtime):
+- `tokio::spawn`, `tokio::task::{JoinSet, yield_now}`;
+- `tokio::time::{sleep, timeout, interval, Instant}`;
+- `tokio::sync::*`, `select!`, `tokio::io` traits and `duplex`.
 
-The extended `disallowed-methods` list bans `tokio::spawn`, `tokio::time::*`, `tokio::net::*` and `tokio::fs::*` outside kubemu-env-real.
+There's no `Tasks` trait: tokio is the task API.
+
+**Banned outside kubemu-env-real** (added to `clippy.toml`):
+- `tokio::task::spawn_blocking`, `block_in_place`;
+- `tokio::runtime::Builder::new_multi_thread`;
+- `tokio::net::*`, `tokio::fs::*`, `tokio::process::*`, `tokio::signal::*`.
+
+The existing std bans stay.
+
+**Env**
+- `Clock`: the mono clock is backed by `tokio::time::Instant` in both modes, so `Env::clock` and tokio timers always agree. Wall time = a fixed origin + mono in sim, `SystemTime` in real.
+- `Rng`: unchanged. The tokio RNG seed is derived from the sim seed.
+- `Net`: `listen`, `connect` and `bind_udp` over kubemu-level addresses, returning boxed `AsyncRead + AsyncWrite` streams. Real = `tokio::net`, sim = option 2. Lands in M1 with the API server.
+- `Fs`, `Spawn`: real-only until a crate needs them; added then.
 
 ## Consequences
 
-- M0 lands `Tasks` plus the sim executor and timers. `Net` lands early in M1 with the API server. `Fs` lands when needed.
-- The DST harness moves from the hand-rolled step loop to real async tasks (clients, watchers, controllers) scheduled by the seeded executor. The trace records every scheduling decision.
-- Async libraries are judged on whether they work over our I/O traits. hyper, rustls and h2 do. hickory-dns needs a runtime-provider adapter.
-- If the custom executor turns out to be a maintenance burden, turmoil is the fallback for the net layer only.
+- We can't randomise task scheduling order the way a custom executor could, so some ordering bugs are harder to find. Mitigation: the sim inserts seeded `yield_now` and sleep jitter at `Env` seams (net reads and writes, store watch wakeups) to perturb interleavings per seed.
+- The DST harness moves from the hand-rolled step loop to real tokio tasks (writers, watchers, later controllers) on the paused runtime. The trace and the determinism check stay as they are.
+- Everything builds with `tokio_unstable`. tokio's unstable API surface can change between minor versions, so pin tokio and review it in the weekly dependency job.
+- hyper, h2 and rustls work over tokio I/O traits unchanged. hickory-dns works with tokio directly.
+- If tokio ever exposes a scheduling hook, or `rng_seed` changes, we revisit this ADR.
