@@ -33,7 +33,7 @@ Watch cache:
 - The event log becomes a persistent vector (`imbl::Vector`), so a fork keeps its history and watchers on the fork can resume.
 - Compaction is bounded by event count, configurable per cluster. Count, not age, keeps it deterministic with no clock dependency. Age-based compaction can come later through `Env::clock`.
 - Bookmarks are synthesised at the current resourceVersion when a watcher asks for them. They don't go into the log.
-- Fan-out: a watcher is a cursor plus a wakeup registered with `Env` tasks (ADR 0001). Writers append and wake, and each watcher pulls. Slow watchers can't block writers, and if they fall behind compaction they get 410.
+- Fan-out: a watcher is a cursor and the store is pull-based. Writers append, and each watcher pulls when its driver decides: the seeded DST loop in sim, or a tokio `Notify` wakeup in the shell (ADR 0001). Slow watchers can't block writers, and if they fall behind compaction they get 410.
 - Secondary indexes (namespace, labels, owner UID) are also `OrdMap`s inside `ClusterStore`, so they fork for free.
 
 ## Consequences

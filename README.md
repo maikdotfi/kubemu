@@ -2,7 +2,7 @@
 
 > **kubemu** (pronounced *kube emu*) is a single Rust binary that emulates enough of Kubernetes to deploy and test real workloads (app, database, ingress, operators) across multiple clusters, in CI or locally. It uses a fraction of the resources of kind/k3s, and seeded fault injection is a first-class feature.
 
-> **Status: scaffold, pre-M0.** The workspace, `Env` traits (clock + RNG), a basic versioned store with watch, the determinism lints and a store-only DST harness exist. Everything else is a placeholder crate.
+> **Status: scaffold, M0 ready to start.** The workspace, `Env` traits (clock + RNG), a basic versioned store with watch, the determinism lints and a store-only DST harness exist. Everything else is a placeholder crate. The ADRs M0 needs (0001, 0002, 0007, 0008) are accepted; see §14.
 
 **Developing**
 ```sh
@@ -308,15 +308,19 @@ Every failure found anywhere (DST, fuzzing, corpus) becomes a permanent regressi
 ---
 
 ## 14. Decisions to write as ADRs first
-1. Determinism model: synchronous core + tokio shell (accepted, Turso-style).
-2. Store data structure for O(1) snapshot (persistent maps) and the watch cache design.
-3. Pod networking default: netns+veth vs the loopback+seccomp experimental mode.
-4. Rootful-first privilege model.
-5. Image format: EROFS/composefs vs plain overlay for v1.
-6. Turso integration boundary: in-process API, connection model, how substitution is declared.
-7. Kubernetes version policy: which minor version the API targets, and how the Go oracle is pinned to it.
-8. Forge choice for CI (GitHub self-hosted runners vs Forgejo).
-9. License and naming (check that "kubemu" is free on crates.io and GitHub).
+ADRs live in [`docs/adr/`](docs/adr/). **Every ADR that M0 needs is accepted, so M0 can start.** The others aren't written yet and need sign-off before their milestone starts.
+
+| # | Decision | Status | Needed by |
+|---|---|---|---|
+| [0001](docs/adr/0001-sim-executor.md) | Determinism model: synchronous deterministic core + tokio shell (Turso-style) | **Accepted** | M0 |
+| [0002](docs/adr/0002-store-snapshots-and-watch-cache.md) | Store: `imbl::OrdMap` for O(1) fork, per-cluster watch log | **Accepted** | M0 |
+| [0003](docs/adr/0003-pod-networking.md) | Pod networking default: netns+veth vs the loopback+seccomp experimental mode | Proposed, not written | M2 |
+| [0004](docs/adr/0004-rootful-first.md) | Rootful-first privilege model | Proposed, not written | M2 |
+| [0005](docs/adr/0005-image-format.md) | Image format: EROFS/composefs vs plain overlay for v1 | Proposed, not written | M2 |
+| [0006](docs/adr/0006-turso-boundary.md) | Turso integration boundary: in-process API, connection model, how substitution is declared | Proposed, not written | M3 |
+| [0007](docs/adr/0007-k8s-version-policy.md) | Kubernetes version policy: single target minor, **1.37** | **Accepted** | M0 |
+| [0008](docs/adr/0008-ci-forge.md) | CI forge: GitHub Actions; hosted runners now, self-hosted later | **Accepted** | M0 |
+| [0009](docs/adr/0009-license-and-naming.md) | License and naming (check that "kubemu" is free on crates.io and GitHub) | Proposed, not written | M6 |
 
 ---
 
