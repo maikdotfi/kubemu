@@ -93,3 +93,32 @@ pub fn spawn_piped(
         .stdout(std::process::Stdio::piped())
         .spawn()
 }
+
+/// File access for build scripts (`build.rs`), which run at compile time
+/// and so sit outside the runtime determinism boundary, but are linted like
+/// everything else. Not for runtime code.
+pub mod build_script {
+    use std::path::{Path, PathBuf};
+
+    /// `OUT_DIR`, as Cargo sets it for a running build script.
+    pub fn out_dir() -> PathBuf {
+        std::env::var_os("OUT_DIR")
+            .map(PathBuf::from)
+            .expect("OUT_DIR is set for build scripts")
+    }
+
+    /// Reads a file and tells Cargo to rerun the build script when it changes.
+    pub fn read_tracked(path: &Path) -> std::io::Result<Vec<u8>> {
+        println!("cargo::rerun-if-changed={}", path.display());
+        std::fs::read(path)
+    }
+
+    /// Writes `contents` unless the file already holds exactly that, so
+    /// dependents are not rebuilt for nothing.
+    pub fn write_if_changed(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+        if std::fs::read(path).is_ok_and(|old| old == contents) {
+            return Ok(());
+        }
+        std::fs::write(path, contents)
+    }
+}

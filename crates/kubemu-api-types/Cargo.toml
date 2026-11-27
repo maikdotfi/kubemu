@@ -1,6 +1,6 @@
 [package]
 name = "kubemu-api-types"
-description = "Wraps k8s-openapi: schema metadata and patch strategies"
+description = "Resource table, schemas and OpenAPI documents from vendored upstream specs (ADR 0012)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,3 +9,7 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[build-dependencies]
+kubemu-env-real.workspace = true
+serde_json.workspace = true

@@ -16,6 +16,13 @@ for mod in k8s.io/api k8s.io/apimachinery k8s.io/client-go; do
   fi
 done
 
+# Vendored upstream OpenAPI (ADR 0012): refreshed by scripts/fetch-openapi.sh.
+spec=$(cat crates/kubemu-api-types/openapi/VERSION 2>/dev/null || true)
+kubectl=$(sed -n 's/^kubectl *= *"\([0-9.]*\)".*/v\1/p' mise.toml)
+if [ "$spec" != "$kubectl" ]; then
+  echo "vendored openapi is ${spec:-missing}, want $kubectl (run scripts/fetch-openapi.sh)"; fail=1
+fi
+
 # k8s-openapi joins in M1; check it once it is a dependency.
 if grep -q '^k8s-openapi' Cargo.toml; then
   grep -q "\"v1_$want\"" Cargo.toml || { echo "k8s-openapi feature is not v1_$want"; fail=1; }

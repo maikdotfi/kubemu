@@ -37,6 +37,10 @@ description = "Differential fuzz vs the Go oracle: mise run fuzz -- --cases 1000
 depends = ["oracle-build"]
 run = "cargo run -q --release -p kubemu-oracle-fuzz -- --oracle target/oracle-go"
 
+[tasks.openapi]
+description = "Vendor upstream api/openapi-spec at the pinned version (ADR 0012)"
+run = "scripts/fetch-openapi.sh"
+
 [tasks.pins]
 description = "Check that all Kubernetes pins target one minor (ADR 0007)"
 run = "scripts/check-k8s-pins.sh"
