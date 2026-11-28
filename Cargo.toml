@@ -24,9 +24,14 @@ kubemu-faults = { path = "crates/kubemu-faults" }
 kubemu-patch = { path = "crates/kubemu-patch" }
 kubemu-scheduler = { path = "crates/kubemu-scheduler" }
 kubemu-store = { path = "crates/kubemu-store" }
+kubemu-validation = { path = "crates/kubemu-validation" }
 
 # External. Pinned in Cargo.lock; add here only when code uses them.
 imbl = "7.0.2"
+# resource.Quantity values (kubemu-validation): arbitrary precision, as inf.Dec.
+num-bigint = { version = "0.4.6", default-features = false, features = ["std"] }
+num-integer = { version = "0.1.46", default-features = false }
+num-traits = { version = "0.2.19", default-features = false, features = ["std"] }
 serde_json = "1.0.154"
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 # Shell crates only (ADR 0001): never in a core crate, checked by scripts/check-core-deps.sh.

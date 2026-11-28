@@ -5,8 +5,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str =
-    "usage: kubemu-oracle-fuzz --oracle PATH [--op merge|jsonpatch|smp] [--seed S] [--cases N]";
+const USAGE: &str = "usage: kubemu-oracle-fuzz --oracle PATH [--op merge|jsonpatch|smp|quantity|default|strategy] [--seed S] [--cases N]";
 
 type Case = fn(&mut kubemu_oracle_fuzz::Oracle, u64) -> kubemu_oracle_fuzz::CaseResult;
 
@@ -14,6 +13,9 @@ const OPS: &[(&str, Case)] = &[
     ("merge", kubemu_oracle_fuzz::merge_case),
     ("jsonpatch", kubemu_oracle_fuzz::jsonpatch_case),
     ("smp", kubemu_oracle_fuzz::smp_case),
+    ("quantity", kubemu_oracle_fuzz::quantity_case),
+    ("default", kubemu_oracle_fuzz::default_case),
+    ("strategy", kubemu_oracle_fuzz::strategy_case),
 ];
 
 fn main() -> ExitCode {

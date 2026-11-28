@@ -26,7 +26,7 @@ pub mod object;
 mod read;
 mod selector;
 mod status;
-mod strategy;
+pub mod strategy;
 mod watch;
 mod write;
 

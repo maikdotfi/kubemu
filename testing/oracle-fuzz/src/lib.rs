@@ -8,6 +8,10 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout};
 
+mod validation;
+
+pub use validation::{default_case, quantity_case, strategy_case};
+
 use kubemu_api_types::{RESOURCES, Schema, Ty};
 use kubemu_env::Xoshiro256StarStar;
 use serde_json::{Map, Value, json};
@@ -76,7 +80,7 @@ impl Gen {
         Self(Xoshiro256StarStar::seed_from_u64(seed))
     }
 
-    fn below(&mut self, n: u64) -> u64 {
+    pub(crate) fn below(&mut self, n: u64) -> u64 {
         if n == 0 {
             return 0;
         }
@@ -151,7 +155,7 @@ fn agree(ours: &Result<Value, String>, theirs: &Result<Value, String>) -> bool {
     }
 }
 
-fn same_json(a: &Value, b: &Value) -> bool {
+pub(crate) fn same_json(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Number(x), Value::Number(y)) => x == y || x.as_f64() == y.as_f64(),
         (Value::Array(x), Value::Array(y)) => {
@@ -220,11 +224,11 @@ pub fn smp_case(oracle: &mut Oracle, seed: u64) -> CaseResult {
 
 /// JSON patch inputs.
 impl Gen {
-    fn chance(&mut self, num: u64, den: u64) -> bool {
+    pub(crate) fn chance(&mut self, num: u64, den: u64) -> bool {
         self.below(den) < num
     }
 
-    fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
+    pub(crate) fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
         &items[self.below(items.len() as u64) as usize]
     }
 

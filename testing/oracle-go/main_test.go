@@ -108,3 +108,42 @@ func TestPanicBecomesError(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 }
+
+func rawCall(t *testing.T, op, payload string) Response {
+	t.Helper()
+	return handle(Request{Op: op, Payload: json.RawMessage(payload)})
+}
+
+func TestQuantity(t *testing.T) {
+	assertJSON(t, rawCall(t, "quantity", `{"value":"1000m"}`), `"1"`)
+	assertJSON(t, rawCall(t, "quantity", `{"value":"1n","roundUp":true}`), `"1m"`)
+	if got := rawCall(t, "quantity", `{"value":"1kk"}`); got.Error == "" {
+		t.Fatal("expected a suffix error")
+	}
+}
+
+func TestDefault(t *testing.T) {
+	got := rawCall(t, "default", `{"object":{"apiVersion":"v1","kind":"Secret","metadata":{"name":"s"}}}`)
+	if got.Error != "" {
+		t.Fatal(got.Error)
+	}
+	var r struct{ Defaulted map[string]any }
+	if err := json.Unmarshal(got.Result, &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.Defaulted["type"] != "Opaque" {
+		t.Fatalf("secret type not defaulted: %s", got.Result)
+	}
+}
+
+func TestValidate(t *testing.T) {
+	got := rawCall(t, "validate", `{"object":{"apiVersion":"v1","kind":"Pod","metadata":{"name":"p","namespace":"default"},"spec":{"containers":[{"name":"c"}]}}}`)
+	assertJSON(t, got, `[{"reason":"FieldValueRequired","field":"spec.containers[0].image","message":"Required value"}]`)
+	got = rawCall(t, "validate", `{"object":{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"c","namespace":"default"}}}`)
+	assertJSON(t, got, `[]`)
+}
+
+func TestStrategy(t *testing.T) {
+	got := rawCall(t, "strategy", `{"group":"","kind":"Service"}`)
+	assertJSON(t, got, `{"allowCreateOnUpdate":true,"allowUnconditionalUpdate":true,"namespaceScoped":true}`)
+}

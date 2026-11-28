@@ -7,9 +7,11 @@
 //! - `null` fields are dropped (they decode to Go zero values, which
 //!   encode as absent).
 //! - Strings with a format the Go type parses (`[]byte` as base64,
-//!   `resource.Quantity`, `metav1.Time`) must parse.
+//!   `resource.Quantity`, `metav1.Time`) must parse. Quantities come back
+//!   in the canonical form Go re-encodes them in.
 
 use kubemu_api_types::{Schema, Ty};
+use kubemu_validation::quantity;
 use serde_json::{Map, Value};
 
 use crate::status::{ApiError, ApiResult};
@@ -245,14 +247,10 @@ impl Decoder {
                 Value::Number(n) if n.as_i64().is_some_and(|i| i32::try_from(i).is_ok()) => v,
                 _ => return Err(mismatch(&v, s, path)),
             },
+            // Parsed, and re-encoded in canonical form (`1000m` is `1`).
             Ty::Quantity => match &v {
-                Value::String(q) if is_quantity(q) => v,
-                Value::Number(_) => v,
-                Value::String(_) => {
-                    return Err(
-                        "quantities must match the regular expression '^([+-]?[0-9.]+)([eEinumkKMGTP]*[-+]?[0-9]*)$'"
-                            .into(),
-                    );
+                Value::String(_) | Value::Number(_) => {
+                    Value::String(quantity::canonicalize_json(&v, false).map_err(str::to_owned)?)
                 }
                 _ => return Err(mismatch(&v, s, path)),
             },
@@ -302,39 +300,6 @@ fn is_rfc3339(s: &str) -> bool {
         && digits(14..16)
         && b[16] == b':'
         && digits(17..19)
-}
-
-/// `resource.ParseQuantity`'s accepted shape.
-fn is_quantity(s: &str) -> bool {
-    let s = s.strip_prefix(['+', '-']).unwrap_or(s);
-    let num_end = s
-        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
-        .unwrap_or(s.len());
-    let (num, suffix) = s.split_at(num_end);
-    if num.is_empty() || num == "." || num.matches('.').count() > 1 {
-        return false;
-    }
-    matches!(
-        suffix,
-        "" | "Ki"
-            | "Mi"
-            | "Gi"
-            | "Ti"
-            | "Pi"
-            | "Ei"
-            | "n"
-            | "u"
-            | "m"
-            | "k"
-            | "M"
-            | "G"
-            | "T"
-            | "P"
-            | "E"
-    ) || suffix
-        .strip_prefix(['e', 'E'])
-        .map(|e| e.strip_prefix(['+', '-']).unwrap_or(e))
-        .is_some_and(|e| !e.is_empty() && e.chars().all(|c| c.is_ascii_digit()))
 }
 
 #[cfg(test)]
@@ -402,12 +367,18 @@ mod tests {
     }
 
     #[test]
-    fn quantities() {
-        for q in ["1", "500m", "1.5Gi", "+2", "1e3", "0.1", "128974848"] {
-            assert!(is_quantity(q), "{q}");
-        }
-        for q in ["", "m", "1x", "1..2", "Gi1"] {
-            assert!(!is_quantity(q), "{q}");
-        }
+    fn quantities_are_canonical() {
+        let d = pod(json!({"spec": {"containers": [{"resources": {"limits": {"cpu": "1000m", "memory": 1024}, "requests": {"cpu": "+5"}}}]}})).unwrap();
+        assert_eq!(
+            d.value["spec"]["containers"][0]["resources"],
+            json!({"limits": {"cpu": "1", "memory": "1024"}, "requests": {"cpu": "+5"}})
+        );
+        let e = pod(json!({"spec": {"containers": [{"resources": {"limits": {"cpu": "1kk"}}}]}}))
+            .unwrap_err();
+        assert!(
+            e.message.ends_with("unable to parse quantity's suffix"),
+            "{}",
+            e.message
+        );
     }
 }

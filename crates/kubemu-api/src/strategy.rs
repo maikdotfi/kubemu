@@ -23,11 +23,12 @@ pub fn has_status(r: &ResourceInfo) -> bool {
     r.subresource("status").is_some()
 }
 
-/// `AllowCreateOnUpdate`: PUT to a missing object creates it.
+/// `AllowCreateOnUpdate`: PUT to a missing object creates it. Checked
+/// against the registry strategies by the oracle (`strategy` op).
 pub fn allow_create_on_update(r: &ResourceInfo) -> bool {
     matches!(
         (r.group, r.plural),
-        ("", "endpoints" | "events") | ("discovery.k8s.io", "endpointslices")
+        ("", "endpoints" | "events" | "services")
     )
 }
 
@@ -36,9 +37,26 @@ pub fn returns_deleted_object(r: &ResourceInfo) -> bool {
     is(r, "", "pods")
 }
 
-/// Whether `metadata.generation` is maintained (bumped on spec changes).
+/// Whether `metadata.generation` is maintained: set to 1 on create, bumped
+/// when [`generation_changes`] says so.
 pub fn tracks_generation(r: &ResourceInfo) -> bool {
-    is(r, "", "pods")
+    is(r, "", "pods") || is(r, "discovery.k8s.io", "endpointslices")
+}
+
+/// Whether an update bumps `metadata.generation`: a pod's spec changed; an
+/// endpoint slice changed anywhere outside metadata, or in its labels.
+fn generation_changes(r: &ResourceInfo, new: &Value, old: &Value) -> bool {
+    if is(r, "", "pods") {
+        return new.get("spec") != old.get("spec");
+    }
+    let strip = |v: &Value| {
+        let mut v = v.clone();
+        if let Some(m) = v.as_object_mut() {
+            m.remove("metadata");
+        }
+        v
+    };
+    strip(new) != strip(old) || new["metadata"].get("labels") != old["metadata"].get("labels")
 }
 
 /// `PrepareForCreate`: the parts of a new object the client does not set.
@@ -78,6 +96,20 @@ pub fn prepare_for_create(r: &ResourceInfo, obj: &mut Value) {
             obj["status"] = json!({"loadBalancer": {}});
         }
         _ => {}
+    }
+}
+
+/// `Canonicalize`, after validation: a namespace's name label, which
+/// defaulting could not set while a `generateName` was still pending.
+pub fn canonicalize(r: &ResourceInfo, obj: &mut Value) {
+    if is(r, "", "namespaces") {
+        let name = crate::object::name(obj).to_owned();
+        let m = meta_mut(obj);
+        let labels = m.entry("labels").or_insert_with(|| json!({}));
+        if !labels.is_object() {
+            *labels = json!({});
+        }
+        labels["kubernetes.io/metadata.name"] = json!(name);
     }
 }
 
@@ -137,7 +169,7 @@ pub fn prepare_for_update(r: &ResourceInfo, new: &mut Value, old: &Value, sub: O
     }
     if tracks_generation(r) {
         let g = old["metadata"]["generation"].as_i64().unwrap_or(1);
-        let bump = new.get("spec") != old.get("spec");
+        let bump = generation_changes(r, new, old);
         meta_mut(new).insert("generation".into(), json!(if bump { g + 1 } else { g }));
     }
 }

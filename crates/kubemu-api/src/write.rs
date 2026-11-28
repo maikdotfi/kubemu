@@ -80,6 +80,8 @@ impl Api {
         let mut obj = d.value;
         obj["apiVersion"] = json!(want);
         obj["kind"] = json!(r.kind);
+        // The scheme's defaulters run as part of decoding.
+        kubemu_validation::default(r.group, r.kind, &mut obj);
         Ok((obj, warnings))
     }
 
@@ -316,6 +318,7 @@ impl Api {
         self.admit_namespace(ctx, &name)?;
         strategy::prepare_for_create(r, &mut obj);
         self.validate(r, &obj)?;
+        strategy::canonicalize(r, &mut obj);
         if ctx.dry_run()? {
             return Ok(with_warnings(HttpResponse::json(201, obj), warnings));
         }
@@ -418,6 +421,7 @@ impl Api {
             }
         }
         self.validate(r, &obj)?;
+        strategy::canonicalize(r, &mut obj);
         if obj == *old {
             return Ok(with_warnings(HttpResponse::json(200, obj), warnings));
         }

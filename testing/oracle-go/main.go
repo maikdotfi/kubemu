@@ -12,7 +12,8 @@
 //	jsonpatch  RFC 6902 JSON patch     gopkg.in/evanphx/json-patch.v4 DecodePatch + Apply
 //	smp        strategic merge patch   strategicpatch.StrategicMergeMapPatch
 //
-// Planned: ssa (structured-merge-diff), validate (validation and defaulting).
+// quantity, default, validate and strategy are in validate.go. Planned: ssa
+// (structured-merge-diff).
 package main
 
 import (
@@ -73,9 +74,25 @@ func handle(req Request) (resp Response) {
 		})
 	case "smp":
 		return withPayload(req, smp)
+	case "quantity":
+		return raw(req, quantity)
+	case "default":
+		return raw(req, defaults)
+	case "validate":
+		return raw(req, validate)
+	case "strategy":
+		return raw(req, strategyInfo)
 	default:
 		return Response{Error: fmt.Sprintf("op %q not implemented", req.Op)}
 	}
+}
+
+func raw(req Request, f func(json.RawMessage) ([]byte, error)) Response {
+	out, err := f(req.Payload)
+	if err != nil {
+		return Response{Error: err.Error()}
+	}
+	return Response{Result: out}
 }
 
 func withPayload(req Request, f func(patchPayload) ([]byte, error)) Response {

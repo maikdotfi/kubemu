@@ -283,6 +283,7 @@ dependencies = [
  "kubemu-env-sim",
  "kubemu-patch",
  "kubemu-store",
+ "kubemu-validation",
  "serde_json",
 ]
 
@@ -378,10 +379,12 @@ version = "0.0.0"
 name = "kubemu-oracle-fuzz"
 version = "0.0.0"
 dependencies = [
+ "kubemu-api",
  "kubemu-api-types",
  "kubemu-env",
  "kubemu-env-real",
  "kubemu-patch",
+ "kubemu-validation",
  "serde_json",
 ]
 
@@ -434,6 +437,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kubemu-validation"
+version = "0.0.0"
+dependencies = [
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+ "serde_json",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -466,6 +479,25 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys",
+]
+
+[[package]]
+name = "num-bigint"
+version = "0.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
+name = "num-integer"
+version = "0.1.47"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ce2d95d4b3734dc35aa2f45e1aa22cd416814592a4f9d9205e11affd5b8e10b"
+dependencies = [
+ "num-traits",
 ]
 
 [[package]]

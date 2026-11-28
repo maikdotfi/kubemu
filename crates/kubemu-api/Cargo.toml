@@ -15,6 +15,7 @@ kubemu-api-types.workspace = true
 kubemu-env.workspace = true
 kubemu-patch.workspace = true
 kubemu-store.workspace = true
+kubemu-validation.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

@@ -317,11 +317,12 @@ M1 follows ADRs [0010](docs/adr/0010-object-model-and-wire-format.md) (JSON obje
 
 For the next agent; each is either step 7 work or a deliberate deferral.
 - **Protobuf request bodies** (ADR 0010 revisit, needs owner sign-off): blocks `helm install` and kubectl's typed commands.
-- **Defaulting** (step 7): pods lack upstream defaults (`restartPolicy`, `dnsPolicy`, `terminationMessagePath`, port `protocol`, ...), Services lack `type`/`sessionAffinity`, quantities are not canonicalized (`1000m` stays `1000m`).
+- *(Done in step 7.)* **Defaulting**: every scheme defaulter for the T0 kinds (`kubemu-validation`), and quantities canonicalized, both fuzzed against the oracle. Not ported: pod-level resource requests (deferred to `PrepareForCreate` upstream), H2C probe protocol (alpha, off).
+- **Go's typed round trip is not emulated**: fields Go drops as omitempty zero values (`hostNetwork: false`, `limits: {}`) stay in kubemu's JSON. Quantities sent as JSON floats in exponent form (`1e3`) canonicalize from serde_json's float text, not the original.
 - **Services get no `clusterIP`** (IP allocation arrives with networking, M2).
 - **No server-side Table output**: `kubectl get` shows only NAME and AGE.
 - **No `managedFields`**, no server-side apply (M3; apply requests get 415).
-- **Guessed, not oracle-checked** (verify in step 7): which resources allow create-on-update (endpoints, events, endpointslices here), which track `metadata.generation` (pods here), DELETE response shapes, deletecollection's response.
+- *(Checked in step 7 against the registry strategies, `strategy` fuzz op.)* Create-on-update is endpoints, events and services (not endpointslices); pods and endpointslices track `metadata.generation`. Still guessed: DELETE response shapes, deletecollection's response.
 - **Controllers scan everything each round** (O(objects)); fine at test scale, replace with informers/work queues when benchmarks say so.
 - **No `kube-root-ca.crt` ConfigMap or `kubernetes` Service** in namespaces (need TLS and service IPs).
 - **Single cluster per `kubemu up`**, plain HTTP, no auth (ADR 0011).

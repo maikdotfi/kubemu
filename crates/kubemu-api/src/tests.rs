@@ -653,3 +653,107 @@ fn self_subject_reviews_allow_everything() {
         405
     );
 }
+
+#[test]
+fn defaulting_on_writes() {
+    let mut t = T::new();
+    let (code, pod) = t.post(
+        "/api/v1/namespaces/default/pods",
+        json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "p"},
+               "spec": {"containers": [{"name": "c", "image": "nginx",
+                   "ports": [{"containerPort": 80}],
+                   "resources": {"limits": {"cpu": "1000m", "memory": "1n"}}}]}}),
+    );
+    assert_eq!(code, 201, "{pod}");
+    let spec = &pod["spec"];
+    assert_eq!(spec["restartPolicy"], "Always");
+    assert_eq!(spec["dnsPolicy"], "ClusterFirst");
+    assert_eq!(spec["terminationGracePeriodSeconds"], 30);
+    assert_eq!(spec["schedulerName"], "default-scheduler");
+    let c = &spec["containers"][0];
+    assert_eq!(c["imagePullPolicy"], "Always");
+    assert_eq!(c["ports"][0]["protocol"], "TCP");
+    assert_eq!(c["terminationMessagePath"], "/dev/termination-log");
+    // Canonical, rounded up to milli units, and requests from limits.
+    assert_eq!(
+        c["resources"],
+        json!({"limits": {"cpu": "1", "memory": "1m"}, "requests": {"cpu": "1", "memory": "1m"}})
+    );
+
+    let (code, svc) = t.post(
+        "/api/v1/namespaces/default/services",
+        json!({"apiVersion": "v1", "kind": "Service", "metadata": {"name": "s"},
+               "spec": {"ports": [{"port": 80}]}}),
+    );
+    assert_eq!(code, 201, "{svc}");
+    assert_eq!(svc["spec"]["type"], "ClusterIP");
+    assert_eq!(svc["spec"]["sessionAffinity"], "None");
+    assert_eq!(svc["spec"]["internalTrafficPolicy"], "Cluster");
+    assert_eq!(
+        svc["spec"]["ports"][0],
+        json!({"port": 80, "protocol": "TCP", "targetPort": 80})
+    );
+
+    // Defaulting runs on patches too.
+    let (code, svc) = t.patch(
+        "/api/v1/namespaces/default/services/s",
+        "application/merge-patch+json",
+        json!({"spec": {"ports": [{"port": 81}]}}),
+    );
+    assert_eq!(code, 200, "{svc}");
+    assert_eq!(svc["spec"]["ports"][0]["targetPort"], 81);
+}
+
+#[test]
+fn namespace_name_label() {
+    let mut t = T::new();
+    let (_, ns) = t.get("/api/v1/namespaces/default");
+    assert_eq!(
+        ns["metadata"]["labels"]["kubernetes.io/metadata.name"],
+        "default"
+    );
+    let (code, ns) = t.post(
+        "/api/v1/namespaces",
+        json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"generateName": "gen-"}}),
+    );
+    assert_eq!(code, 201, "{ns}");
+    let name = ns["metadata"]["name"].as_str().unwrap();
+    assert_eq!(
+        ns["metadata"]["labels"]["kubernetes.io/metadata.name"],
+        name
+    );
+}
+
+#[test]
+fn strategies_match_upstream() {
+    let mut t = T::new();
+    // Services allow create-on-update; endpoint slices do not.
+    let svc = json!({"apiVersion": "v1", "kind": "Service", "metadata": {"name": "s"},
+                     "spec": {"ports": [{"port": 80}]}});
+    assert_eq!(t.put("/api/v1/namespaces/default/services/s", svc).0, 201);
+    let eps = json!({"apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSlice",
+                     "metadata": {"name": "e"}, "addressType": "IPv4", "endpoints": []});
+    let path = "/apis/discovery.k8s.io/v1/namespaces/default/endpointslices";
+    assert_eq!(t.put(&format!("{path}/e"), eps.clone()).0, 404);
+    // Endpoint slices track generation: labels and content bump it.
+    let (_, e) = t.post(path, eps.clone());
+    assert_eq!(e["metadata"]["generation"], 1);
+    let (_, e) = t.patch(
+        &format!("{path}/e"),
+        "application/merge-patch+json",
+        json!({"metadata": {"annotations": {"a": "b"}}}),
+    );
+    assert_eq!(e["metadata"]["generation"], 1);
+    let (_, e) = t.patch(
+        &format!("{path}/e"),
+        "application/merge-patch+json",
+        json!({"metadata": {"labels": {"a": "b"}}}),
+    );
+    assert_eq!(e["metadata"]["generation"], 2);
+    let (_, e) = t.patch(
+        &format!("{path}/e"),
+        "application/merge-patch+json",
+        json!({"endpoints": [{"addresses": ["10.0.0.1"]}]}),
+    );
+    assert_eq!(e["metadata"]["generation"], 3);
+}

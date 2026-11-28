@@ -16,6 +16,17 @@ for mod in k8s.io/api k8s.io/apimachinery k8s.io/client-go; do
   fi
 done
 
+# The oracle's defaulting and validation come from k8s.io/kubernetes itself
+# (v1.x), with its staging modules replaced to the matching v0.x.
+got=$(sed -n 's|^[[:space:]]*k8s.io/kubernetes v1\.\([0-9]*\)\..*|\1|p' testing/oracle-go/go.mod | head -1)
+if [ "$got" != "$want" ]; then
+  echo "k8s.io/kubernetes is v1.${got:-missing}, want v1.$want"; fail=1
+fi
+bad=$(grep -E '^replace k8s\.io/[a-z-]+ => k8s\.io/[a-z-]+ v0\.' testing/oracle-go/go.mod | grep -v " v0\.$want\." || true)
+if [ -n "$bad" ]; then
+  echo "staging replaces off the pinned minor:"; echo "$bad"; fail=1
+fi
+
 # Vendored upstream OpenAPI (ADR 0012): refreshed by scripts/fetch-openapi.sh.
 spec=$(cat crates/kubemu-api-types/openapi/VERSION 2>/dev/null || true)
 kubectl=$(sed -n 's/^kubectl *= *"\([0-9.]*\)".*/v\1/p' mise.toml)
