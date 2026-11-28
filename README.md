@@ -7,10 +7,13 @@
 **Developing**
 ```sh
 mise install            # Go (oracle), kubectl, helm, kind. Rust comes from rust-toolchain.toml via rustup.
-mise run ci             # fmt, clippy (incl. determinism lints), tests, k8s pins, Go oracle, differential fuzz, 1000-seed DST sweep
+mise run ci             # fmt, clippy (incl. determinism lints), tests, k8s pins, core-deps, Go oracle, differential fuzz, kubectl smoke, 1000-seed DST sweep
 mise run sim -- --seed 42                 # replay a single seed
 mise run fuzz -- --op smp --seed 7 --cases 1   # replay one differential-fuzz case (merge|jsonpatch|smp)
+mise run smoke                            # kubectl smoke test against `kubemu up`
+mise run openapi                          # re-vendor upstream OpenAPI at the kubectl pin (ADR 0012)
 cargo run -p kubemu-cli -- help           # the kubemu binary
+cargo run -p kubemu-cli -- up --port 6443 --kubeconfig /tmp/kc   # serve one cluster; KUBECONFIG=/tmp/kc kubectl get ns
 ```
 Design decisions go in [`docs/adr/`](docs/adr/).
 
@@ -306,9 +309,22 @@ M1 follows ADRs [0010](docs/adr/0010-object-model-and-wire-format.md) (JSON obje
 6. *(Done, ahead of step 5, to get real kubectl on the frontend early.)* **HTTP shell (`kubemu-apiserver`) and the binary.** Tokio, hyper and axum arrive here and in `kubemu-cli` only. In the same commit: the tokio bans in `clippy.toml` and the CI check that core crates don't depend on tokio (ADR 0001); listener binding goes through `kubemu-env-real`. Core behind a `Mutex`, called inline; watches wait on a `Notify` and stream chunked JSON. Shell tests drive real HTTP against an in-memory core. CLI: `kubemu up` (one cluster) and `kubemu kubeconfig` (`server: http://127.0.0.1:<port>`).
 7. **Validation and defaulting (ADR 0013).** Add `validate`/`default` ops to `testing/oracle-go` for the T0 types; port only observable rules, each fuzzed against the oracle; list the rest in a compatibility report.
 8. **Exit criteria.**
-   - A kubectl smoke test in CI: `get`, `apply`, `delete`, `watch` against `kubemu up`.
-   - An informer harness (client-go 1.37) for list/watch/relist/bookmarks. It also settles ADR 0010's open check that client-go, kubectl and Helm work with JSON only.
+   - *(Done.)* A kubectl smoke test in CI: `get`, `apply`, `delete`, `watch` against `kubemu up` (`scripts/kubectl-smoke.sh`).
+   - An informer harness (client-go 1.37) for list/watch/relist/bookmarks. ADR 0010's open check is already answered by kubectl and Helm: typed clients send protobuf bodies (see the status note at the top); the harness should use whatever content type the ADR revisit settles on.
    - Budget baselines recorded in `testing/bench` (§4.4: idle RSS, empty-cluster-ready time, fork time).
+
+### 12.2 Known gaps after steps 1–6
+
+For the next agent; each is either step 7 work or a deliberate deferral.
+- **Protobuf request bodies** (ADR 0010 revisit, needs owner sign-off): blocks `helm install` and kubectl's typed commands.
+- **Defaulting** (step 7): pods lack upstream defaults (`restartPolicy`, `dnsPolicy`, `terminationMessagePath`, port `protocol`, ...), Services lack `type`/`sessionAffinity`, quantities are not canonicalized (`1000m` stays `1000m`).
+- **Services get no `clusterIP`** (IP allocation arrives with networking, M2).
+- **No server-side Table output**: `kubectl get` shows only NAME and AGE.
+- **No `managedFields`**, no server-side apply (M3; apply requests get 415).
+- **Guessed, not oracle-checked** (verify in step 7): which resources allow create-on-update (endpoints, events, endpointslices here), which track `metadata.generation` (pods here), DELETE response shapes, deletecollection's response.
+- **Controllers scan everything each round** (O(objects)); fine at test scale, replace with informers/work queues when benchmarks say so.
+- **No `kube-root-ca.crt` ConfigMap or `kubernetes` Service** in namespaces (need TLS and service IPs).
+- **Single cluster per `kubemu up`**, plain HTTP, no auth (ADR 0011).
 
 ---
 
@@ -340,7 +356,7 @@ ADRs live in [`docs/adr/`](docs/adr/). **Every ADR that M0 and M1 need is accept
 | [0007](docs/adr/0007-k8s-version-policy.md) | Kubernetes version policy: single target minor, **1.37** | **Accepted** | M0 |
 | [0008](docs/adr/0008-ci-forge.md) | CI forge: GitHub Actions; hosted runners now, self-hosted later | **Accepted** | M0 |
 | [0009](docs/adr/0009-license-and-naming.md) | License and naming (check that "kubemu" is free on crates.io and GitHub) | Proposed, not written | M6 |
-| [0010](docs/adr/0010-object-model-and-wire-format.md) | Object model: JSON values in the store, JSON-only wire format | **Accepted** | M1 |
+| [0010](docs/adr/0010-object-model-and-wire-format.md) | Object model: JSON values in the store, JSON-only wire format | **Accepted**; its open check failed (typed clients send protobuf), revisit pending owner sign-off | M1 |
 | [0011](docs/adr/0011-api-server-shell.md) | API server: synchronous `kubemu-api` frontend + thin tokio HTTP shell (Turso-style), plain HTTP, multi-cluster deferred | **Accepted** | M1 |
 | [0012](docs/adr/0012-schema-source.md) | Schemas, discovery and OpenAPI from vendored upstream `api/openapi-spec` | **Accepted** | M1 |
 | [0013](docs/adr/0013-validation-and-defaulting.md) | Validation and defaulting: port only what users observe, oracle-checked | **Accepted** | M1 |
