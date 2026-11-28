@@ -11,6 +11,7 @@ tag="v$(sed -n 's/^kubectl *= *"\([0-9.]*\)".*/\1/p' mise.toml)"
 [ "$tag" != "v" ] || { echo "no kubectl pin in mise.toml"; exit 1; }
 V3=(
   api__v1
+  apis__authorization.k8s.io__v1
   apis__discovery.k8s.io__v1
 )
 

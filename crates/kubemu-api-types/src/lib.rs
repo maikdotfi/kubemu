@@ -361,7 +361,14 @@ mod tests {
         assert!(!v2("/apis/apps/v1"));
         assert!(!v2("io.k8s.api.apps.v1.Deployment\""));
         let paths: Vec<&str> = OPENAPI_V3.iter().map(|d| d.path).collect();
-        assert_eq!(paths, ["api/v1", "apis/discovery.k8s.io/v1"]);
+        assert_eq!(
+            paths,
+            [
+                "api/v1",
+                "apis/authorization.k8s.io/v1",
+                "apis/discovery.k8s.io/v1"
+            ]
+        );
         assert!(OPENAPI_V3.iter().all(|d| d.hash.len() == 16));
     }
 }

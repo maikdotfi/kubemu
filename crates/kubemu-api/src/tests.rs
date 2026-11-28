@@ -606,3 +606,26 @@ fn forks_are_isolated() {
         .response();
     assert_eq!(r.status, 200);
 }
+
+#[test]
+fn self_subject_reviews_allow_everything() {
+    let mut t = T::new();
+    let (s, r) = t.post(
+        "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews",
+        json!({"spec": {"resourceAttributes": {"verb": "create", "resource": "pods"}}}),
+    );
+    assert_eq!((s, r["status"]["allowed"].as_bool()), (201, Some(true)));
+    let (s, r) = t.post(
+        "/apis/authorization.k8s.io/v1/selfsubjectrulesreviews",
+        json!({"spec": {"namespace": "default"}}),
+    );
+    assert_eq!(
+        (s, r["status"]["resourceRules"][0]["verbs"][0].as_str()),
+        (201, Some("*"))
+    );
+    assert_eq!(
+        t.get("/apis/authorization.k8s.io/v1/selfsubjectaccessreviews")
+            .0,
+        405
+    );
+}

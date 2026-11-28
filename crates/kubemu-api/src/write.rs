@@ -191,6 +191,12 @@ impl Api {
     pub(crate) fn create(&mut self, ctx: &Ctx<'_>, req: &HttpRequest) -> ApiResult<HttpResponse> {
         check_body_type(req)?;
         let (obj, warnings) = self.decode_object(ctx, parse_json(&req.body)?)?;
+        if ctx.r.group == "authorization.k8s.io" {
+            return Ok(with_warnings(
+                HttpResponse::json(201, review(obj)),
+                warnings,
+            ));
+        }
         self.create_value(ctx, obj, warnings)
     }
 
@@ -581,6 +587,24 @@ impl Api {
             }),
         ))
     }
+}
+
+/// Self-subject reviews: there is no authorization in M1, so everything is
+/// allowed (ADR 0011). The review is answered, never stored.
+fn review(mut obj: Value) -> Value {
+    if let Some(m) = obj.get_mut("metadata").and_then(Value::as_object_mut) {
+        m.insert("creationTimestamp".into(), Value::Null);
+    }
+    obj["status"] = if obj["kind"] == "SelfSubjectAccessReview" {
+        json!({"allowed": true, "reason": "kubemu has no authorization: every client is cluster-admin"})
+    } else {
+        json!({
+            "resourceRules": [{"verbs": ["*"], "apiGroups": ["*"], "resources": ["*"]}],
+            "nonResourceRules": [{"verbs": ["*"], "nonResourceURLs": ["*"]}],
+            "incomplete": false,
+        })
+    };
+    obj
 }
 
 fn with_warnings(mut r: HttpResponse, w: Vec<String>) -> HttpResponse {

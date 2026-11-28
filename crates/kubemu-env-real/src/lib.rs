@@ -122,3 +122,45 @@ pub mod build_script {
         std::fs::write(path, contents)
     }
 }
+
+/// Sockets for shell crates. They wrap the returned std sockets into
+/// their async runtime (`tokio::net::TcpListener::from_std`).
+pub mod net {
+    /// A bound, non-blocking TCP listener, handed to a shell crate.
+    #[derive(Debug)]
+    pub struct Listener(std::net::TcpListener);
+
+    impl Listener {
+        pub fn local_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+            self.0.local_addr()
+        }
+
+        /// For `tokio::net::TcpListener::from_std`.
+        pub fn into_std(self) -> std::net::TcpListener {
+            self.0
+        }
+    }
+
+    pub fn bind_tcp(addr: &str) -> std::io::Result<Listener> {
+        let l = std::net::TcpListener::bind(addr)?;
+        l.set_nonblocking(true)?;
+        Ok(Listener(l))
+    }
+
+    /// Connects a non-blocking TCP stream (shell tests, clients).
+    pub fn connect_tcp(addr: std::net::SocketAddr) -> std::io::Result<std::net::TcpStream> {
+        let s = std::net::TcpStream::connect(addr)?;
+        s.set_nonblocking(true)?;
+        Ok(s)
+    }
+}
+
+/// Files the CLI writes for the user (kubeconfigs).
+pub mod fs {
+    pub fn write(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(path, contents)
+    }
+}

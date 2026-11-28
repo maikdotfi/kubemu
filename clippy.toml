@@ -1,10 +1,12 @@
 # Determinism boundary (README §1.2, §3.1).
 # All nondeterminism goes through `kubemu_env::Env`. Only `kubemu-env-real` may
 # touch the real world; it opts out with a crate-level `#![allow(...)]`.
-# Core crates must not depend on tokio at all (ADR 0001). When tokio arrives
-# for the shell, ban creating real handles through it here
-# (`tokio::net::*::bind`/`connect`, `tokio::fs::*`, `tokio::process::*`),
-# and `rand::thread_rng` if rand is added.
+# Core crates must not depend on tokio at all (ADR 0001, checked by
+# scripts/check-core-deps.sh). Shell crates may use tokio, but not to create
+# real handles: sockets, files and processes come from `kubemu-env-real`.
+# Ban `rand::thread_rng` here if rand is ever added. Bans on tokio's `fs` and
+# `process` APIs are `allow-invalid` only because those tokio features are
+# off (the paths do not exist yet); they apply as soon as they are enabled.
 
 disallowed-methods = [
   { path = "std::time::Instant::now", reason = "use Env::clock" },
@@ -18,6 +20,15 @@ disallowed-methods = [
   { path = "std::fs::remove_file", reason = "use Env fs" },
   { path = "std::fs::remove_dir_all", reason = "use Env fs" },
   { path = "std::env::var", reason = "configuration must be explicit, not ambient" },
+  { path = "tokio::net::TcpListener::bind", reason = "use kubemu_env_real::net" },
+  { path = "tokio::net::TcpStream::connect", reason = "use kubemu_env_real::net" },
+  { path = "tokio::net::UdpSocket::bind", reason = "use kubemu_env_real::net" },
+  { path = "tokio::fs::read", reason = "use Env fs", allow-invalid = true },
+  { path = "tokio::fs::read_to_string", reason = "use Env fs", allow-invalid = true },
+  { path = "tokio::fs::write", reason = "use Env fs", allow-invalid = true },
+  { path = "tokio::fs::create_dir_all", reason = "use Env fs", allow-invalid = true },
+  { path = "tokio::fs::remove_file", reason = "use Env fs", allow-invalid = true },
+  { path = "tokio::fs::remove_dir_all", reason = "use Env fs", allow-invalid = true },
 ]
 
 disallowed-types = [
@@ -30,4 +41,8 @@ disallowed-types = [
   { path = "std::net::TcpListener", reason = "use Env net" },
   { path = "std::net::UdpSocket", reason = "use Env net" },
   { path = "std::process::Command", reason = "use Env spawn" },
+  { path = "tokio::fs::File", reason = "use Env fs", allow-invalid = true },
+  { path = "tokio::fs::OpenOptions", reason = "use Env fs", allow-invalid = true },
+  { path = "tokio::net::TcpSocket", reason = "use kubemu_env_real::net" },
+  { path = "tokio::process::Command", reason = "use Env spawn", allow-invalid = true },
 ]

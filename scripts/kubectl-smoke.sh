@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# M1 exit criterion (README §12.1): kubectl get/apply/delete/watch against
+# `kubemu up`. Uses the kubectl pinned in mise.toml.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+KUBECTL=${KUBECTL:-$(mise which kubectl)}
+cargo build -q -p kubemu-cli
+work=$(mktemp -d)
+log="$work/up.log"
+export KUBECONFIG="$work/kubeconfig"
+target/debug/kubemu up --port 0 --cluster smoke --kubeconfig "$KUBECONFIG" 2>"$log" &
+pid=$!
+trap 'kill $pid 2>/dev/null || true; rm -rf "$work"' EXIT
+for _ in $(seq 100); do grep -q serving "$log" && break; sleep 0.1; done
+grep -q serving "$log" || { cat "$log"; exit 1; }
+
+k() { "$KUBECTL" "$@"; }
+fail() { echo "SMOKE FAIL: $*"; cat "$log"; exit 1; }
+expect() { [ "$1" = "$2" ] || fail "$3: got '$1', want '$2'"; }
+
+k version >/dev/null
+grep -q '^pods ' <<<"$(k api-resources)" || fail "api-resources lists pods"
+expect "$(k get ns -o name | sort | tr '\n' ' ')" "namespace/default namespace/kube-node-lease namespace/kube-public namespace/kube-system " "system namespaces"
+
+cat >"$work/app.yaml" <<'YAML'
+apiVersion: v1
+kind: Namespace
+metadata: {name: smoke}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: settings, namespace: smoke}
+data: {mode: fast}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: web, namespace: smoke, labels: {app: web}}
+spec:
+  containers: [{name: web, image: nginx, ports: [{containerPort: 80}]}]
+YAML
+k apply -f "$work/app.yaml" >/dev/null
+sed -i.bak 's/mode: fast/mode: slow/' "$work/app.yaml"
+expect "$(k apply -f "$work/app.yaml" | grep settings)" "configmap/settings configured" "re-apply"
+expect "$(k -n smoke get cm settings -o jsonpath='{.data.mode}')" "slow" "apply updated data"
+
+# Watch while writing.
+k -n smoke get cm -w --output-watch-events --no-headers >"$work/watch" 2>&1 &
+wpid=$!
+sleep 1
+k -n smoke patch cm settings --type=merge -p '{"data":{"mode":"patched"}}' >/dev/null
+k -n smoke get cm settings -o json | sed 's/"patched"/"replaced"/' | k replace -f - >/dev/null
+k -n smoke delete cm settings >/dev/null
+for _ in $(seq 50); do grep -q DELETED "$work/watch" && break; sleep 0.1; done
+kill $wpid 2>/dev/null || true
+expect "$(awk '{print $1}' "$work/watch" | tr '\n' ' ')" "ADDED MODIFIED MODIFIED DELETED " "watch events"
+
+k -n smoke label pod web tier=fe >/dev/null
+expect "$(k -n smoke get pods -l tier=fe -o name)" "pod/web" "label selector"
+k -n smoke delete pod web >/dev/null
+expect "$(k -n smoke get pods -o name)" "" "pod deleted"
+# `kubectl auth can-i` sends protobuf (ADR 0010 open check), so send the
+# same review as JSON. --validate=false: for create-only kinds kubectl wants
+# /openapi/v2 as protobuf, the same open check.
+expect "$(printf '%s' '{"apiVersion":"authorization.k8s.io/v1","kind":"SelfSubjectAccessReview","spec":{"resourceAttributes":{"verb":"create","resource":"pods"}}}' \
+  | k create --validate=false -f - -o jsonpath='{.status.allowed}')" "true" "self-subject access review"
+k get cm -A --field-selector metadata.namespace=kube-system >/dev/null
+echo "kubectl smoke: ok ($("$KUBECTL" version --client -o json | grep -m1 gitVersion | tr -d ' ",'))"

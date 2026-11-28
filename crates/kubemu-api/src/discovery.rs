@@ -236,7 +236,13 @@ mod tests {
         assert!(names.contains(&"pods") && names.contains(&"pods/status"));
         assert!(!names.contains(&"deployments"));
         let groups = api_group_list();
-        assert_eq!(groups["groups"][0]["name"], "discovery.k8s.io");
+        let names: Vec<&str> = groups["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["authorization.k8s.io", "discovery.k8s.io"]);
         assert!(api_group("apps").is_err());
         assert!(api_resource_list("apps", "v1").is_err());
     }
@@ -257,7 +263,13 @@ mod tests {
         assert_eq!(pods["shortNames"], json!(["po"]));
         assert_eq!(pods["subresources"][0]["subresource"], "status");
         let apis = aggregated(false).value().unwrap();
-        assert_eq!(apis["items"][0]["metadata"]["name"], "discovery.k8s.io");
+        assert!(
+            apis["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|g| g["metadata"]["name"] == "discovery.k8s.io")
+        );
     }
 
     #[test]

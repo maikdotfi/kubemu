@@ -13,3 +13,9 @@ workspace = true
 [[bin]]
 name = "kubemu"
 path = "src/main.rs"
+
+[dependencies]
+kubemu-api.workspace = true
+kubemu-apiserver.workspace = true
+kubemu-env-real.workspace = true
+tokio.workspace = true

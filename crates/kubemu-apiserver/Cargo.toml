@@ -1,6 +1,6 @@
 [package]
 name = "kubemu-apiserver"
-description = "HTTP layer: discovery, OpenAPI, CRUD, list/watch, admission, streaming"
+description = "Thin tokio HTTP shell over kubemu-api (ADR 0011)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,3 +9,15 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+axum.workspace = true
+futures-util.workspace = true
+kubemu-api.workspace = true
+kubemu-env.workspace = true
+kubemu-env-real.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util"] }

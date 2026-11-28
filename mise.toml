@@ -41,11 +41,19 @@ run = "cargo run -q --release -p kubemu-oracle-fuzz -- --oracle target/oracle-go
 description = "Vendor upstream api/openapi-spec at the pinned version (ADR 0012)"
 run = "scripts/fetch-openapi.sh"
 
+[tasks.core-deps]
+description = "Check core crates do not depend on an async runtime (ADR 0001)"
+run = "scripts/check-core-deps.sh"
+
+[tasks.smoke]
+description = "kubectl smoke test against `kubemu up` (needs kubectl from mise)"
+run = "scripts/kubectl-smoke.sh"
+
 [tasks.pins]
 description = "Check that all Kubernetes pins target one minor (ADR 0007)"
 run = "scripts/check-k8s-pins.sh"
 
 [tasks.ci]
 description = "Everything the PR pipeline runs locally"
-depends = ["lint", "test", "oracle", "pins", "fuzz"]
+depends = ["lint", "test", "oracle", "pins", "core-deps", "fuzz", "smoke"]
 run = "cargo run -q -p kubemu-sim -- --seeds 1000 --check-determinism"

@@ -47,6 +47,26 @@ pub const SERVED: &[Served] = &[
     core("Secret", "secrets", &[], &[], &[]),
     core("ServiceAccount", "serviceaccounts", &["sa"], &[], &[]),
     core("Service", "services", &["svc"], &["all"], &["status"]),
+    // Virtual: answered, never stored. No RBAC in M1, so always "allowed"
+    // (ADR 0011).
+    Served {
+        group: "authorization.k8s.io",
+        version: "v1",
+        kind: "SelfSubjectAccessReview",
+        plural: "selfsubjectaccessreviews",
+        short_names: &[],
+        categories: &[],
+        subresources: &[],
+    },
+    Served {
+        group: "authorization.k8s.io",
+        version: "v1",
+        kind: "SelfSubjectRulesReview",
+        plural: "selfsubjectrulesreviews",
+        short_names: &[],
+        categories: &[],
+        subresources: &[],
+    },
     Served {
         group: "discovery.k8s.io",
         version: "v1",
