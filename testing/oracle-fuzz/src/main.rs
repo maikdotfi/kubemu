@@ -1,11 +1,15 @@
 //! `kubemu-oracle-fuzz --oracle PATH [--seed S] [--cases N]`
 //!
 //! Build the oracle first: `mise run fuzz` does both.
+//!
+//! `--openapi-v2-pb check|write` instead checks the committed protobuf
+//! OpenAPI v2 against Go's conversion of the served JSON, or writes Go's
+//! conversion to stdout (ADR 0014; `mise run openapi-v2-pb`).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: kubemu-oracle-fuzz --oracle PATH [--op merge|jsonpatch|smp|quantity|default|validate|strategy] [--seed S] [--cases N]";
+const USAGE: &str = "usage: kubemu-oracle-fuzz --oracle PATH [--op merge|jsonpatch|smp|quantity|default|validate|strategy|proto] [--seed S] [--cases N] | --oracle PATH --openapi-v2-pb check|write";
 
 type Case = fn(&mut kubemu_oracle_fuzz::Oracle, u64) -> kubemu_oracle_fuzz::CaseResult;
 
@@ -17,6 +21,7 @@ const OPS: &[(&str, Case)] = &[
     ("default", kubemu_oracle_fuzz::default_case),
     ("validate", kubemu_oracle_fuzz::validate_case),
     ("strategy", kubemu_oracle_fuzz::strategy_case),
+    ("proto", kubemu_oracle_fuzz::proto_case),
 ];
 
 fn main() -> ExitCode {
@@ -24,6 +29,7 @@ fn main() -> ExitCode {
     let mut start = 0u64;
     let mut cases = 10_000u64;
     let mut only: Option<String> = None;
+    let mut openapi_pb: Option<String> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -37,6 +43,7 @@ fn main() -> ExitCode {
             "--cases" => cases = num("--cases"),
             "--oracle" => oracle = args.next().map(PathBuf::from),
             "--op" => only = args.next(),
+            "--openapi-v2-pb" => openapi_pb = args.next(),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return ExitCode::SUCCESS;
@@ -59,6 +66,10 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    if let Some(mode) = openapi_pb {
+        return openapi_v2_pb(&mut o, &mode);
+    }
 
     if let Some(op) = &only
         && !OPS.iter().any(|(name, _)| name == op)
@@ -100,5 +111,42 @@ fn main() -> ExitCode {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+fn openapi_v2_pb(o: &mut kubemu_oracle_fuzz::Oracle, mode: &str) -> ExitCode {
+    let pb = match kubemu_oracle_fuzz::openapi_v2_pb(o) {
+        Ok(pb) => pb,
+        Err(e) => {
+            eprintln!("oracle openapi-v2-pb: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match mode {
+        "write" => {
+            use std::io::Write;
+            let mut out = std::io::stdout().lock();
+            if out.write_all(&pb).and_then(|()| out.flush()).is_err() {
+                return ExitCode::FAILURE;
+            }
+            ExitCode::SUCCESS
+        }
+        "check" if pb == kubemu_api_types::OPENAPI_V2_PB => {
+            println!(
+                "openapi-v2-pb: committed protobuf matches the served JSON ({} bytes)",
+                pb.len()
+            );
+            ExitCode::SUCCESS
+        }
+        "check" => {
+            eprintln!(
+                "openapi-v2-pb: crates/kubemu-api-types/openapi-v2.pb is stale; run `mise run openapi-v2-pb`"
+            );
+            ExitCode::FAILURE
+        }
+        other => {
+            eprintln!("--openapi-v2-pb wants check or write, not {other:?}\n{USAGE}");
+            ExitCode::from(2)
+        }
     }
 }

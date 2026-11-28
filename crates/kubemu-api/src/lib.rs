@@ -14,9 +14,10 @@
 //! and get/list/watch/create/update/patch/delete/deletecollection on the
 //! resources in `kubemu-api-types` (T0), with `/status`, label and field
 //! selectors, resourceVersion semantics, pagination, finalizers,
-//! graceful pod deletion and namespace lifecycle. Not yet: per-resource
-//! defaulting and validation (ADR 0013, §12.1 step 7), server-side apply
-//! (M3), Table output, protobuf (ADR 0010: never).
+//! graceful pod deletion and namespace lifecycle. Bodies are JSON, or
+//! protobuf for built-in types, decoded to JSON by `kubemu-proto` (ADR
+//! 0014); responses are JSON. Not yet: server-side apply (M3), Table
+//! output.
 
 mod decode;
 mod discovery;
@@ -44,7 +45,9 @@ pub use object::Obj;
 pub use status::{ApiError, ApiResult, Cause};
 pub use watch::{WatchBatch, WatchCursor};
 
-use http::{Target, accepts_json, parse_path, wants_aggregated_discovery};
+use http::{
+    Target, accepts_json, parse_path, wants_aggregated_discovery, wants_openapi_v2_protobuf,
+};
 use object::{as_list_item, key, storage_resource};
 use read::{Filter, parse_rv};
 use status::Subject;
@@ -321,6 +324,9 @@ impl Api {
             && wants_aggregated_discovery(accept)
         {
             return Ok(discovery::aggregated(core));
+        }
+        if matches!(t, Target::OpenApiV2) && wants_openapi_v2_protobuf(accept) {
+            return Ok(discovery::openapi_v2_protobuf());
         }
         if !matches!(t, Target::Health) {
             accepts_json(accept)?;

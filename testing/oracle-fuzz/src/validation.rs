@@ -205,7 +205,7 @@ const HOT: &[&str] = &[
 
 /// A well-typed value of `schema` (the oracle's typed decode must accept
 /// it), with scalars from small sets so defaulting branches are hit.
-fn typed(g: &mut Gen, schema: Schema, depth: u32) -> Option<Value> {
+pub(crate) fn typed(g: &mut Gen, schema: Schema, depth: u32) -> Option<Value> {
     Some(match schema.ty() {
         Ty::Object { .. } => {
             if depth == 0 {
@@ -271,7 +271,7 @@ fn typed(g: &mut Gen, schema: Schema, depth: u32) -> Option<Value> {
 }
 
 /// Kinds kubemu stores, weighted to those with defaults.
-fn stored_kind(g: &mut Gen) -> &'static kubemu_api_types::ResourceInfo {
+pub(crate) fn stored_kind(g: &mut Gen) -> &'static kubemu_api_types::ResourceInfo {
     let (group, plural) = *g.pick(&[
         ("", "pods"),
         ("", "pods"),

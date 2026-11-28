@@ -60,6 +60,8 @@ pub enum Body {
     /// Pre-rendered JSON (embedded OpenAPI documents).
     Static(&'static str),
     Text(String),
+    /// Pre-rendered binary (the protobuf OpenAPI v2, ADR 0014).
+    Bytes(&'static [u8]),
 }
 
 impl Body {
@@ -68,6 +70,7 @@ impl Body {
             Self::Json(v) => v.to_string().into_bytes(),
             Self::Static(s) => s.as_bytes().to_vec(),
             Self::Text(s) => s.as_bytes().to_vec(),
+            Self::Bytes(b) => b.to_vec(),
         }
     }
 }
@@ -100,7 +103,7 @@ impl HttpResponse {
         match &self.body {
             Body::Json(v) => Some(v.clone()),
             Body::Static(s) => serde_json::from_str(s).ok(),
-            Body::Text(_) => None,
+            Body::Text(_) | Body::Bytes(_) => None,
         }
     }
 }
@@ -333,7 +336,8 @@ fn media_types(accept: Option<&str>) -> Vec<(String, BTreeMap<String, String>)> 
 }
 
 /// Whether plain JSON is acceptable. Requests for other encodings only
-/// (protobuf, CBOR, YAML) get 406 (ADR 0010); `as=Table` and other
+/// (protobuf, CBOR, YAML) get 406 (ADR 0010, 0014: request bodies may be
+/// protobuf, responses are JSON); `as=Table` and other
 /// transformations kubemu does not serve fall through to a plain-JSON
 /// alternative if the client lists one.
 pub fn accepts_json(accept: Option<&str>) -> ApiResult<()> {
@@ -352,6 +356,32 @@ pub fn accepts_json(accept: Option<&str>) -> ApiResult<()> {
             accept.unwrap_or("")
         )))
     }
+}
+
+/// The protobuf OpenAPI v2 media type kube-openapi answers with (gnostic
+/// `openapi_v2.Document`). Clients ask for it as `...spec.v2@v1.0+protobuf`,
+/// which Go's MIME parser cannot read back, so the answer uses the other.
+pub const OPENAPI_V2_PROTOBUF: &str = "application/com.github.proto-openapi.spec.v2.v1.0+protobuf";
+
+/// Whether the protobuf OpenAPI v2 is the client's first choice, by `q`
+/// and then order, over JSON (kube-openapi's negotiation).
+pub fn wants_openapi_v2_protobuf(accept: Option<&str>) -> bool {
+    let mut best: Option<(f64, bool)> = None;
+    for (t, p) in media_types(accept) {
+        let pb = matches!(
+            t.as_str(),
+            "application/com.github.proto-openapi.spec.v2.v1.0+protobuf"
+                | "application/com.github.proto-openapi.spec.v2@v1.0+protobuf"
+        );
+        if !pb && !matches!(t.as_str(), "application/json" | "application/*" | "*/*") {
+            continue;
+        }
+        let q = p.get("q").and_then(|q| q.parse().ok()).unwrap_or(1.0);
+        if q > 0.0 && best.is_none_or(|(bq, _)| q > bq) {
+            best = Some((q, pb));
+        }
+    }
+    best.is_some_and(|(_, pb)| pb)
 }
 
 /// Whether the client asks for aggregated discovery (`apidiscovery.k8s.io/v2`).
@@ -451,6 +481,18 @@ mod tests {
             .is_ok()
         );
         assert!(accepts_json(Some("application/vnd.kubernetes.protobuf")).is_err());
+        let pb = "application/com.github.proto-openapi.spec.v2@v1.0+protobuf";
+        assert!(wants_openapi_v2_protobuf(Some(pb)));
+        assert!(wants_openapi_v2_protobuf(Some(&format!(
+            "{pb}, application/json"
+        ))));
+        assert!(!wants_openapi_v2_protobuf(Some(&format!(
+            "application/json, {pb}"
+        ))));
+        assert!(!wants_openapi_v2_protobuf(Some(&format!(
+            "{pb}; q=0.5, application/json"
+        ))));
+        assert!(!wants_openapi_v2_protobuf(None));
         assert!(accepts_json(Some("application/json;as=Table;v=v1;g=meta.k8s.io")).is_err());
         assert!(wants_aggregated_discovery(Some(
             "application/json;g=apidiscovery.k8s.io;v=v2;as=APIGroupDiscoveryList,application/json"

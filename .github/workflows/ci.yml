@@ -51,17 +51,20 @@ jobs:
         run: go vet ./... && go test ./...
       - name: differential fuzz vs Go oracle
         run: mise run fuzz -- --cases 10000
+      - name: protobuf OpenAPI v2 matches Go's conversion (ADR 0014)
+        run: mise run openapi-v2-pb-check
 
   kubectl-smoke:
-    # M1 exit criterion: kubectl get/apply/delete/watch against `kubemu up`.
+    # M1 exit criterion: kubectl get/apply/delete/watch against `kubemu up`,
+    # plus protobuf-sending typed clients: kubectl create, helm (ADR 0014).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: jdx/mise-action@v3
         with:
-          install_args: kubectl
+          install_args: kubectl helm
       - name: Install toolchain from rust-toolchain.toml
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - name: kubectl smoke test
+      - name: kubectl and helm smoke test
         run: scripts/kubectl-smoke.sh

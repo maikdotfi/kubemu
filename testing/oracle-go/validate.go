@@ -13,8 +13,11 @@ package main
 //	          PrepareForCreate, strategy validation, object meta validation
 //	          and declarative validation, exactly as a create or update
 //	strategy  per-kind registry strategy answers kubemu guessed (README §12.2)
+//	proto     protobuf encoding of a typed object, and the JSON the
+//	          apiserver makes of it (ADR 0014)
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -26,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/runtime/serializer/protobuf"
 	"k8s.io/apimachinery/pkg/types"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
@@ -112,6 +116,34 @@ type objectPayload struct {
 	Object json.RawMessage `json:"object"`
 	// Old is the stored object for an update; absent for a create.
 	Old json.RawMessage `json:"old,omitempty"`
+}
+
+// protoRoundTrip answers the proto op (ADR 0014): the object as a typed
+// client sends it (protobuf, in the runtime.Unknown envelope) and the JSON
+// the apiserver makes of those bytes (protobuf decode, then encoding/json).
+func protoRoundTrip(raw json.RawMessage) ([]byte, error) {
+	var p objectPayload
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, err
+	}
+	obj, _, err := decodeTyped(p.Object)
+	if err != nil {
+		return nil, err
+	}
+	s := protobuf.NewSerializer(legacyscheme.Scheme, legacyscheme.Scheme)
+	var buf bytes.Buffer
+	if err := s.Encode(obj, &buf); err != nil {
+		return nil, err
+	}
+	back, _, err := s.Decode(buf.Bytes(), nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	j, err := json.Marshal(back)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(map[string]any{"protobuf": buf.Bytes(), "json": json.RawMessage(j)})
 }
 
 func defaults(raw json.RawMessage) ([]byte, error) {

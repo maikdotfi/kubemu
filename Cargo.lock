@@ -282,6 +282,7 @@ dependencies = [
  "kubemu-env",
  "kubemu-env-sim",
  "kubemu-patch",
+ "kubemu-proto",
  "kubemu-store",
  "kubemu-validation",
  "serde_json",
@@ -384,6 +385,7 @@ dependencies = [
  "kubemu-env",
  "kubemu-env-real",
  "kubemu-patch",
+ "kubemu-proto",
  "kubemu-validation",
  "serde_json",
 ]
@@ -393,6 +395,13 @@ name = "kubemu-patch"
 version = "0.0.0"
 dependencies = [
  "kubemu-api-types",
+ "serde_json",
+]
+
+[[package]]
+name = "kubemu-proto"
+version = "0.0.0"
+dependencies = [
  "serde_json",
 ]
 

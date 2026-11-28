@@ -12,7 +12,9 @@
 //	jsonpatch  RFC 6902 JSON patch     gopkg.in/evanphx/json-patch.v4 DecodePatch + Apply
 //	smp        strategic merge patch   strategicpatch.StrategicMergeMapPatch
 //
-// quantity, default, validate and strategy are in validate.go. Planned: ssa
+// quantity, default, validate, strategy and proto are in validate.go.
+// openapi-v2-pb is in openapiv2.go. `oracle-go wiretable` prints
+// kubemu-proto's wire table (wiretable.go). Planned: ssa
 // (structured-merge-diff).
 package main
 
@@ -82,6 +84,10 @@ func handle(req Request) (resp Response) {
 		return raw(req, validate)
 	case "strategy":
 		return raw(req, strategyInfo)
+	case "proto":
+		return raw(req, protoRoundTrip)
+	case "openapi-v2-pb":
+		return raw(req, openAPIV2PB)
 	default:
 		return Response{Error: fmt.Sprintf("op %q not implemented", req.Op)}
 	}
@@ -141,6 +147,10 @@ func smp(p patchPayload) ([]byte, error) {
 }
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "wiretable" {
+		runWireTable()
+		return
+	}
 	in := bufio.NewScanner(os.Stdin)
 	in.Buffer(make([]byte, 0, 1<<20), 64<<20)
 	out := bufio.NewWriter(os.Stdout)

@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # M1 exit criterion (README §12.1): kubectl get/apply/delete/watch against
-# `kubemu up`. Uses the kubectl pinned in mise.toml.
+# `kubemu up`, plus the typed clients that send protobuf bodies (kubectl's
+# typed commands, a Helm install; ADR 0014). Uses the kubectl and helm
+# pinned in mise.toml.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 KUBECTL=${KUBECTL:-$(mise which kubectl)}
+HELM=${HELM:-$(mise which helm)}
 cargo build -q -p kubemu-cli
 work=$(mktemp -d)
 log="$work/up.log"
@@ -75,13 +78,28 @@ k -n smoke label pod web tier=fe >/dev/null
 expect "$(k -n smoke get pods -l tier=fe -o name)" "pod/web" "label selector"
 k -n smoke delete pod web >/dev/null
 expect "$(k -n smoke get pods -o name)" "" "pod deleted"
-# `kubectl auth can-i` sends protobuf (ADR 0010 open check), so send the
-# same review as JSON. --validate=false: for create-only kinds kubectl wants
-# /openapi/v2 as protobuf, the same open check.
+# Typed commands send protobuf bodies (ADR 0014).
+k -n smoke create configmap typed --from-literal=a=b >/dev/null
+expect "$(k -n smoke get cm typed -o jsonpath='{.data.a}')" "b" "typed create configmap"
+k -n smoke create secret generic typed --from-literal=p=q >/dev/null
+expect "$(k -n smoke get secret typed -o jsonpath='{.data.p}')" "cQ==" "typed create secret"
+expect "$(k auth can-i create pods)" "yes" "auth can-i"
+# --validate=false: for create-only kinds kubectl's validation lists CRDs,
+# which kubemu does not serve yet (M3).
 expect "$(printf '%s' '{"apiVersion":"authorization.k8s.io/v1","kind":"SelfSubjectAccessReview","spec":{"resourceAttributes":{"verb":"create","resource":"pods"}}}' \
   | k create --validate=false -f - -o jsonpath='{.status.allowed}')" "true" "self-subject access review"
 k get cm -A --field-selector metadata.namespace=kube-system >/dev/null
+# Helm stores its release in a Secret through the typed client (protobuf).
+# --server-side=false: server-side apply is M3.
+mkdir -p "$work/chart/templates"
+printf 'apiVersion: v2\nname: smoke\nversion: 0.1.0\n' >"$work/chart/Chart.yaml"
+printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: from-helm}\ndata: {a: b}\n' >"$work/chart/templates/cm.yaml"
+"$HELM" install rel "$work/chart" -n smoke --server-side=false >/dev/null || fail "helm install"
+expect "$(k -n smoke get cm from-helm -o name)" "configmap/from-helm" "helm installed"
+expect "$("$HELM" list -n smoke -q)" "rel" "helm list"
+"$HELM" uninstall rel -n smoke >/dev/null || fail "helm uninstall"
+expect "$(k -n smoke get cm from-helm --ignore-not-found -o name)" "" "helm uninstalled"
 # Namespace deletion completes (namespace controller, GC of the slice).
 k delete ns smoke --timeout=10s >/dev/null
 expect "$(k get ns smoke --ignore-not-found -o name)" "" "namespace deleted"
-echo "kubectl smoke: ok ($("$KUBECTL" version --client -o json | grep -m1 gitVersion | tr -d ' ",'))"
+echo "kubectl smoke: ok ($("$KUBECTL" version --client -o json | grep -m1 gitVersion | tr -d ' ",'), helm $("$HELM" version --short))"

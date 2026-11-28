@@ -41,12 +41,27 @@ run = "cargo run -q --release -p kubemu-oracle-fuzz -- --oracle target/oracle-go
 description = "Vendor upstream api/openapi-spec at the pinned version (ADR 0012)"
 run = "scripts/fetch-openapi.sh"
 
+[tasks.wiretable]
+description = "Regenerate kubemu-proto's wire table from the Go types (ADR 0014)"
+dir = "testing/oracle-go"
+run = "go run . wiretable > ../../crates/kubemu-proto/wiretable.json"
+
+[tasks.openapi-v2-pb]
+description = "Regenerate the served OpenAPI v2 as protobuf, converted by Go (ADR 0014)"
+depends = ["oracle-build"]
+run = "cargo run -q --release -p kubemu-oracle-fuzz -- --oracle target/oracle-go --openapi-v2-pb write > crates/kubemu-api-types/openapi-v2.pb.tmp && mv crates/kubemu-api-types/openapi-v2.pb.tmp crates/kubemu-api-types/openapi-v2.pb"
+
+[tasks.openapi-v2-pb-check]
+description = "Check the committed protobuf OpenAPI v2 against Go's conversion (ADR 0014)"
+depends = ["oracle-build"]
+run = "cargo run -q --release -p kubemu-oracle-fuzz -- --oracle target/oracle-go --openapi-v2-pb check"
+
 [tasks.core-deps]
 description = "Check core crates do not depend on an async runtime (ADR 0001)"
 run = "scripts/check-core-deps.sh"
 
 [tasks.smoke]
-description = "kubectl smoke test against `kubemu up` (needs kubectl from mise)"
+description = "kubectl and helm smoke test against `kubemu up` (needs kubectl and helm from mise)"
 run = "scripts/kubectl-smoke.sh"
 
 [tasks.pins]
@@ -55,5 +70,5 @@ run = "scripts/check-k8s-pins.sh"
 
 [tasks.ci]
 description = "Everything the PR pipeline runs locally"
-depends = ["lint", "test", "oracle", "pins", "core-deps", "fuzz", "smoke"]
+depends = ["lint", "test", "oracle", "pins", "core-deps", "fuzz", "openapi-v2-pb-check", "smoke"]
 run = "cargo run -q -p kubemu-sim -- --seeds 1000 --check-determinism"

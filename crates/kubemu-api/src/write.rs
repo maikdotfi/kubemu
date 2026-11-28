@@ -23,11 +23,25 @@ fn parse_json(body: &[u8]) -> ApiResult<Value> {
     })
 }
 
-fn check_body_type(req: &HttpRequest) -> ApiResult<()> {
+/// A create or update body as JSON: JSON as sent, or a typed client's
+/// protobuf decoded to the JSON Go would make of it (ADR 0014). An
+/// envelope without type meta is taken as `api_version`/`kind`.
+fn body_value(req: &HttpRequest, api_version: &str, kind: &str) -> ApiResult<Value> {
     match body_type(req.content_type.as_deref()).as_str() {
-        "application/json" | "" | "*/*" => Ok(()),
+        "application/json" | "" | "*/*" => parse_json(&req.body),
+        kubemu_proto::CONTENT_TYPE => {
+            kubemu_proto::decode(&req.body, api_version, kind).map_err(|e| match e {
+                kubemu_proto::Error::Malformed(m) => ApiError::bad_request(format!(
+                    "the body of the request could not be decoded as protobuf: {m}"
+                )),
+                e => ApiError::unsupported_media_type(format!(
+                    "the body of the request was in an unsupported format ({}): {e}",
+                    kubemu_proto::CONTENT_TYPE
+                )),
+            })
+        }
         other => Err(ApiError::unsupported_media_type(format!(
-            "the body of the request was in an unknown format ({other}) - accepted media types include: application/json"
+            "the body of the request was in an unknown format ({other}) - accepted media types include: application/json, application/vnd.kubernetes.protobuf"
         ))),
     }
 }
@@ -181,7 +195,7 @@ impl Api {
 
     /// `POST pods/<name>/binding`: how a scheduler assigns a node.
     fn bind(&mut self, ctx: &Ctx<'_>, req: &HttpRequest) -> ApiResult<HttpResponse> {
-        let b = parse_json(&req.body)?;
+        let b = body_value(req, "v1", "Binding")?;
         let name = ctx.name.clone().unwrap_or_default();
         let node = b["target"]["name"].as_str().unwrap_or("").to_owned();
         if node.is_empty() {
@@ -237,11 +251,11 @@ impl Api {
     }
 
     pub(crate) fn create(&mut self, ctx: &Ctx<'_>, req: &HttpRequest) -> ApiResult<HttpResponse> {
-        check_body_type(req)?;
         if ctx.subresource.as_deref() == Some("binding") {
             return self.bind(ctx, req);
         }
-        let (obj, warnings) = self.decode_object(ctx, parse_json(&req.body)?)?;
+        let body = body_value(req, &ctx.r.api_version(), ctx.r.kind)?;
+        let (obj, warnings) = self.decode_object(ctx, body)?;
         if ctx.r.group == "authorization.k8s.io" {
             return Ok(with_warnings(
                 HttpResponse::json(201, review(obj)),
@@ -317,8 +331,8 @@ impl Api {
     }
 
     pub(crate) fn update(&mut self, ctx: &Ctx<'_>, req: &HttpRequest) -> ApiResult<HttpResponse> {
-        check_body_type(req)?;
-        let (obj, warnings) = self.decode_object(ctx, parse_json(&req.body)?)?;
+        let body = body_value(req, &ctx.r.api_version(), ctx.r.kind)?;
+        let (obj, warnings) = self.decode_object(ctx, body)?;
         self.update_value(ctx, obj, warnings, None)
     }
 
@@ -489,7 +503,7 @@ impl Api {
     }
 
     pub(crate) fn delete(&mut self, ctx: &Ctx<'_>, req: &HttpRequest) -> ApiResult<HttpResponse> {
-        let opts = DeleteOptions::parse(ctx, &req.body)?;
+        let opts = DeleteOptions::parse(ctx, req)?;
         let name = ctx.name.clone().unwrap_or_default();
         self.delete_one(ctx, &name, &opts)
     }
@@ -616,7 +630,7 @@ impl Api {
         ctx: &Ctx<'_>,
         req: &HttpRequest,
     ) -> ApiResult<HttpResponse> {
-        let opts = DeleteOptions::parse(ctx, &req.body)?;
+        let opts = DeleteOptions::parse(ctx, req)?;
         let filter = Filter::parse(&ctx.query, ctx.r.group, ctx.r.plural)?;
         let names: Vec<String> = self
             .cluster(ctx.cluster)?
@@ -681,11 +695,11 @@ struct DeleteOptions {
 }
 
 impl DeleteOptions {
-    fn parse(ctx: &Ctx<'_>, body: &[u8]) -> ApiResult<Self> {
-        let b: Map<String, Value> = if body.iter().all(u8::is_ascii_whitespace) {
+    fn parse(ctx: &Ctx<'_>, req: &HttpRequest) -> ApiResult<Self> {
+        let b: Map<String, Value> = if req.body.iter().all(u8::is_ascii_whitespace) {
             Map::new()
         } else {
-            match parse_json(body)? {
+            match body_value(req, &ctx.r.api_version(), "DeleteOptions")? {
                 Value::Object(m) => m,
                 _ => return Err(ApiError::bad_request("DeleteOptions must be an object")),
             }

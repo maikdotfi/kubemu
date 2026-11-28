@@ -78,3 +78,13 @@ For `/openapi/v2`:
 - **Unaffected:** CRDs and custom resources. Clients send JSON for them, and protobuf for a custom resource gets 415 as it does on a real apiserver.
 - **Fallback:** Option 2 stays open if the hand-written reader proves fragile. It would reuse the same Go-generated facts.
 - **Effort:** about one §12.1 step: a Go generator, a Rust reader with tests, a fuzz op, and the v2 bytes. It lands before the informer harness.
+
+## Follow-up (2026-11-28, after implementation)
+
+- Implemented as the core crate `kubemu-proto`. Its one entry point, `decode`, is called from `kubemu-api`'s write path. The wire table covers all of `k8s.io/api` (349 KB), and the `proto` fuzz op agreed with Go on 50,000 cases.
+- Smoke-tested against `kubemu up`:
+  - Work now: kubectl `create configmap|secret|namespace|serviceaccount`, `auth can-i`, and `helm install|upgrade|uninstall --server-side=false`.
+  - `kubectl create token` still fails: it needs the `serviceaccounts/token` subresource, which kubemu doesn't serve, so the Consequences above overstated it.
+  - `kubectl create -f` of create-only kinds now gets past `/openapi/v2`, but kubectl's validation then lists CRDs (M3). The Consequences above overstated this as well, and it still needs `--validate=false`.
+- kube-openapi answers with `application/com.github.proto-openapi.spec.v2.v1.0+protobuf`, even when asked for the `@v1.0` spelling, because Go's MIME parser rejects `@`. It serves protobuf only when the client ranks it above JSON. kubemu does the same.
+- Not done: refused bodies get a `Status` but no log line or compatibility-report entry, since kubemu has no report yet.

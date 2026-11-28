@@ -25,6 +25,10 @@ impl T {
         (resp.status, resp.value().unwrap_or(Value::Null))
     }
 
+    fn raw(&mut self, r: HttpRequest) -> crate::HttpResponse {
+        self.api.handle("c", &r).response()
+    }
+
     fn get(&mut self, path: &str) -> (u16, Value) {
         self.req(HttpRequest::new("GET", path))
     }
@@ -188,7 +192,7 @@ fn create_rules() {
     let (s, _) = t.req(
         HttpRequest::new("POST", CMS)
             .json(&cm("y"))
-            .with_content_type("application/vnd.kubernetes.protobuf"),
+            .with_content_type("application/cbor"),
     );
     assert_eq!(s, 415);
     let (s, _) =
@@ -796,4 +800,64 @@ fn per_kind_validation() {
     let (code, st) = t.post(p, svc("two", json!([{"port": 80}, {"port": 81}])));
     assert_eq!(code, 422, "{st}");
     assert_eq!(st["details"]["causes"][0]["field"], "spec.ports[0].name");
+}
+
+/// A length-delimited protobuf field.
+fn pb(num: u8, body: &[u8]) -> Vec<u8> {
+    let mut v = vec![num << 3 | 2, u8::try_from(body.len()).expect("short")];
+    v.extend_from_slice(body);
+    v
+}
+
+/// A typed client's body: the `k8s\0` magic and a runtime.Unknown.
+fn pb_body(api_version: &str, kind: &str, raw: &[u8]) -> Vec<u8> {
+    let tm = [pb(1, api_version.as_bytes()), pb(2, kind.as_bytes())].concat();
+    [b"k8s\0".to_vec(), pb(1, &tm), pb(2, raw)].concat()
+}
+
+#[test]
+fn protobuf_request_bodies() {
+    let mut t = T::new();
+    // ConfigMap{metadata: {name: pb}, data: {a: b}}, as kubectl create
+    // configmap sends it (ADR 0014).
+    let cm = [
+        pb(1, &pb(1, b"pb")),
+        pb(2, &[pb(1, b"a"), pb(2, b"b")].concat()),
+    ]
+    .concat();
+    let req = |body: Vec<u8>| HttpRequest {
+        body,
+        ..HttpRequest::new("POST", CMS).with_content_type("application/vnd.kubernetes.protobuf")
+    };
+    let (s, v) = t.req(req(pb_body("v1", "ConfigMap", &cm)));
+    assert_eq!(s, 201, "{v}");
+    assert_eq!(v["metadata"]["name"], "pb");
+    assert_eq!(v["data"], json!({"a": "b"}));
+    assert_eq!(t.get(&format!("{CMS}/pb")).1["data"]["a"], "b");
+    // The envelope's kind is checked against the URL like a JSON body's.
+    assert_eq!(t.req(req(pb_body("v1", "Secret", &cm))).0, 400);
+    // Malformed: 400. A kind with no protobuf encoding: 415.
+    assert_eq!(t.req(req(b"k8s\0\x12\x05ab".to_vec())).0, 400);
+    assert_eq!(t.req(req(pb_body("example.com/v1", "Widget", &[]))).0, 415);
+    // Responses stay JSON.
+    let (s, _) =
+        t.req(HttpRequest::new("GET", CMS).with_accept("application/vnd.kubernetes.protobuf"));
+    assert_eq!(s, 406);
+}
+
+#[test]
+fn openapi_v2_as_protobuf() {
+    let mut t = T::new();
+    let r = t.raw(
+        HttpRequest::new("GET", "/openapi/v2")
+            .with_accept("application/com.github.proto-openapi.spec.v2@v1.0+protobuf"),
+    );
+    assert_eq!(r.status, 200);
+    assert_eq!(
+        r.content_type,
+        "application/com.github.proto-openapi.spec.v2.v1.0+protobuf"
+    );
+    assert_eq!(r.body.to_bytes(), kubemu_api_types::OPENAPI_V2_PB);
+    let r = t.raw(HttpRequest::new("GET", "/openapi/v2").with_accept("application/json"));
+    assert_eq!(r.content_type, "application/json");
 }

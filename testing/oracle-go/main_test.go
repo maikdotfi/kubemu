@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -146,4 +148,16 @@ func TestValidate(t *testing.T) {
 func TestStrategy(t *testing.T) {
 	got := rawCall(t, "strategy", `{"group":"","kind":"Service"}`)
 	assertJSON(t, got, `{"allowCreateOnUpdate":true,"allowUnconditionalUpdate":true,"namespaceScoped":true}`)
+}
+
+// The committed wire table (ADR 0014) must be what the pinned Go types
+// generate: `mise run wiretable` after a Kubernetes bump.
+func TestWireTableUpToDate(t *testing.T) {
+	committed, err := os.ReadFile("../../crates/kubemu-proto/wiretable.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := wireTable(kubernetesVersion()); !bytes.Equal(got, committed) {
+		t.Fatal("crates/kubemu-proto/wiretable.json is stale: run `mise run wiretable`")
+	}
 }

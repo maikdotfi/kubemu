@@ -3,7 +3,8 @@
 //! Kubernetes version (ADR 0007, ADR 0012). `build.rs` filters it to the
 //! resources listed in `served.rs` and generates:
 //! - [`RESOURCES`]: the table discovery is served from;
-//! - [`OPENAPI_V2`] and [`OPENAPI_V3`]: the documents as served;
+//! - [`OPENAPI_V2`] and [`OPENAPI_V3`]: the documents as served (v2 also
+//!   as protobuf, [`OPENAPI_V2_PB`], converted by Go and committed);
 //! - [`Schema`]: every reachable definition as a navigable tree carrying the
 //!   patch metadata (`x-kubernetes-patch-*`, list types) for strategic merge
 //!   patch and the types for pruning and structural validation.
@@ -17,6 +18,12 @@ mod generated {
 
 use generated::{DEFINITIONS, GVKS, NODES};
 pub use generated::{KUBERNETES_VERSION, OPENAPI_V2, OPENAPI_V3, RESOURCES};
+
+/// [`OPENAPI_V2`] as protobuf (gnostic's `openapi_v2.Document`), for
+/// clients that accept only that (kubectl's validation of create-only
+/// kinds; ADR 0014). Converted by Go and committed: `mise run
+/// openapi-v2-pb`; `mise run fuzz` fails when it no longer matches.
+pub static OPENAPI_V2_PB: &[u8] = include_bytes!("../openapi-v2.pb");
 
 /// A served resource, as discovery reports it.
 #[derive(Debug)]

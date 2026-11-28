@@ -22,6 +22,7 @@ kubemu-env-real = { path = "crates/kubemu-env-real" }
 kubemu-apiserver = { path = "crates/kubemu-apiserver" }
 kubemu-faults = { path = "crates/kubemu-faults" }
 kubemu-patch = { path = "crates/kubemu-patch" }
+kubemu-proto = { path = "crates/kubemu-proto" }
 kubemu-scheduler = { path = "crates/kubemu-scheduler" }
 kubemu-store = { path = "crates/kubemu-store" }
 kubemu-validation = { path = "crates/kubemu-validation" }

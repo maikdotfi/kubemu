@@ -190,6 +190,16 @@ pub fn openapi_v2() -> HttpResponse {
     }
 }
 
+/// `GET /openapi/v2` for clients that accept only protobuf (ADR 0014).
+pub fn openapi_v2_protobuf() -> HttpResponse {
+    HttpResponse {
+        status: 200,
+        content_type: crate::http::OPENAPI_V2_PROTOBUF.into(),
+        body: Body::Bytes(kubemu_api_types::OPENAPI_V2_PB),
+        warnings: Vec::new(),
+    }
+}
+
 /// `GET /openapi/v3` (the index) or `GET /openapi/v3/<path>`.
 pub fn openapi_v3(path: Option<&str>) -> ApiResult<HttpResponse> {
     match path {

@@ -2,7 +2,7 @@
 
 > **kubemu** (pronounced *kube emu*) is a single Rust binary that emulates enough of Kubernetes to deploy and test real workloads (app, database, ingress, operators) across multiple clusters, in CI or locally. It uses a fraction of the resources of kind/k3s, and seeded fault injection is a first-class feature.
 
-> **Status: M1 in progress (§12.1 steps 1–7 done; 8 left).** Done: M0, plus vendored upstream OpenAPI (v1.37.3) with the generated resource table and schema arena (`kubemu-api-types`); JSON patch and strategic merge patch ported from the apiserver's Go code and differentially fuzzed against the Go oracle; the synchronous `kubemu-api` frontend (discovery, OpenAPI, CRUD/patch/watch with resourceVersion semantics, selectors, pagination, `/status`, `/binding`, `/finalize`, finalizers, namespace lifecycle); controllers (GC, namespace, ServiceAccount, Endpoints/EndpointSlice, a simulated kubelet and node) and a trivial scheduler, all under DST with end-state invariants; the HTTP shell plus `kubemu up`/`kubemu kubeconfig`, with a kubectl smoke test in CI; and `kubemu-validation` (ADR 0013): quantities, every T0 defaulter, and pod/Service validation for common mistakes, all fuzzed against `k8s.io/kubernetes` itself (the oracle calls `rest.BeforeCreate` with the real registry strategies). **Next agent: §12.1 step 8 (informer harness, budget baselines).** **Open question for the owner (ADR 0010):** typed client-go clients send *protobuf request bodies* for built-in types and do not fall back to JSON on 415. That breaks kubectl's typed commands (`kubectl create configmap|secret|namespace …`, `kubectl auth can-i`) and **all of `helm install` (Helm 4.3), which stores its release Secret that way**, with or without `--server-side`. kubectl `apply`, `create -f`, `replace`, `patch`, `delete`, `get`, `wait` and watches use JSON and work; responses can stay JSON (these clients accept it). For create-only kinds, kubectl's client-side validation also wants `/openapi/v2` as protobuf. ADR 0010 said this finding reopens it; decoding protobuf *request bodies* for built-in types (from vendored `generated.proto`) looks like the smallest fix. See §14 for ADR status.
+> **Status: M1 in progress (§12.1 steps 1–7 done; 8 left).** Done: M0, plus vendored upstream OpenAPI (v1.37.3) with the generated resource table and schema arena (`kubemu-api-types`); JSON patch and strategic merge patch ported from the apiserver's Go code and differentially fuzzed against the Go oracle; the synchronous `kubemu-api` frontend (discovery, OpenAPI, CRUD/patch/watch with resourceVersion semantics, selectors, pagination, `/status`, `/binding`, `/finalize`, finalizers, namespace lifecycle); controllers (GC, namespace, ServiceAccount, Endpoints/EndpointSlice, a simulated kubelet and node) and a trivial scheduler, all under DST with end-state invariants; the HTTP shell plus `kubemu up`/`kubemu kubeconfig`, with a kubectl smoke test in CI; `kubemu-validation` (ADR 0013): quantities, every T0 defaulter, and pod/Service validation for common mistakes, all fuzzed against `k8s.io/kubernetes` itself; and `kubemu-proto` (ADR 0014): protobuf request bodies from typed clients decoded to JSON through a wire table generated from the Go types, fuzzed against Go's own protobuf round trip, so kubectl's typed commands (`create configmap|secret|namespace`, `auth can-i`) and `helm install|upgrade|uninstall --server-side=false` work (smoke-tested in CI). **Next agent: §12.1 step 8 (informer harness, budget baselines).**
 
 **Developing**
 ```sh
@@ -10,8 +10,10 @@ mise install            # Go (oracle), kubectl, helm, kind. Rust comes from rust
 mise run ci             # fmt, clippy (incl. determinism lints), tests, k8s pins, core-deps, Go oracle, differential fuzz, kubectl smoke, 1000-seed DST sweep
 mise run sim -- --seed 42                 # replay a single seed
 mise run fuzz -- --op smp --seed 7 --cases 1   # replay one differential-fuzz case (merge|jsonpatch|smp)
-mise run smoke                            # kubectl smoke test against `kubemu up`
+mise run smoke                            # kubectl + helm smoke test against `kubemu up`
 mise run openapi                          # re-vendor upstream OpenAPI at the kubectl pin (ADR 0012)
+mise run openapi-v2-pb                    # then: regenerate the served OpenAPI v2 as protobuf (ADR 0014)
+mise run wiretable                        # regenerate kubemu-proto's wire table from the Go types (ADR 0014)
 cargo run -p kubemu-cli -- help           # the kubemu binary
 cargo run -p kubemu-cli -- up --port 6443 --kubeconfig /tmp/kc   # serve one cluster; KUBECONFIG=/tmp/kc kubectl get ns
 ```
@@ -81,6 +83,7 @@ crates/
   kubemu-store          # versioned store + watch
   kubemu-api-types      # wraps k8s-openapi, schema metadata, patch strategies
   kubemu-patch          # SMP, JSON patch, merge patch, SSA (managed fields)
+  kubemu-proto          # protobuf request bodies of built-in types -> JSON (ADR 0014)
   kubemu-api            # synchronous API frontend: request pipeline, discovery, admission (ADR 0011)
   kubemu-apiserver      # thin tokio HTTP shell over kubemu-api, streaming
   kubemu-controllers
@@ -299,7 +302,7 @@ Every failure found anywhere (DST, fuzzing, corpus) becomes a permanent regressi
 
 ### 12.1 M1 work plan
 
-M1 follows ADRs [0010](docs/adr/0010-object-model-and-wire-format.md) (JSON objects, JSON-only wire), [0011](docs/adr/0011-api-server-shell.md) (synchronous `kubemu-api` frontend, thin tokio shell, plain HTTP, no auth, one cluster per listener), [0012](docs/adr/0012-schema-source.md) (vendored upstream OpenAPI as the single schema source) and [0013](docs/adr/0013-validation-and-defaulting.md) (validate and default only what users observe, oracle-checked). Read them first. Suggested order, each step landing green on `mise run ci`:
+M1 follows ADRs [0010](docs/adr/0010-object-model-and-wire-format.md) (JSON objects, JSON on the wire; [0014](docs/adr/0014-protobuf-request-bodies.md) adds protobuf request bodies), [0011](docs/adr/0011-api-server-shell.md) (synchronous `kubemu-api` frontend, thin tokio shell, plain HTTP, no auth, one cluster per listener), [0012](docs/adr/0012-schema-source.md) (vendored upstream OpenAPI as the single schema source) and [0013](docs/adr/0013-validation-and-defaulting.md) (validate and default only what users observe, oracle-checked). Read them first. Suggested order, each step landing green on `mise run ci`:
 
 1. *(Done.)* **Schemas (`kubemu-api-types`).** A `mise` task fetches upstream `api/openapi-spec` at the v1.37.x tag and commits it under `crates/kubemu-api-types/openapi/`; extend `scripts/check-k8s-pins.sh` to cover the tag. Expose the T0 resource table (GVK, plural, scope, verbs, short names), the served v2/v3 documents filtered to T0, per-path SMP metadata, and schemas for pruning. Add `k8s-openapi` (feature `v1_37`) only when code uses it.
 2. *(Done.)* **Patching (`kubemu-patch`).** JSON patch and SMP in Rust, SMP metadata read from step 1. The oracle already speaks `jsonpatch` and `smp`; extend `testing/oracle-fuzz` to fuzz both.
@@ -310,13 +313,16 @@ M1 follows ADRs [0010](docs/adr/0010-object-model-and-wire-format.md) (JSON obje
 7. *(Done.)* **Validation and defaulting (ADR 0013).** `testing/oracle-go` imports `k8s.io/kubernetes` v1.37.3 and answers `quantity`, `default`, `validate` (through `rest.BeforeCreate` with the registry strategies) and `strategy`. `kubemu-validation` ports quantities, all T0 defaulters, and the pod and Service rules people trip over; each is fuzzed with messages compared. What is not ported is listed in `kubemu_validation::validation::UNPORTED`, for the compatibility report.
 8. **Exit criteria.**
    - *(Done.)* A kubectl smoke test in CI: `get`, `apply`, `delete`, `watch` against `kubemu up` (`scripts/kubectl-smoke.sh`).
-   - An informer harness (client-go 1.37) for list/watch/relist/bookmarks. ADR 0010's open check is already answered by kubectl and Helm: typed clients send protobuf bodies (see the status note at the top); the harness should use whatever content type the ADR revisit settles on.
+   - An informer harness (client-go 1.37) for list/watch/relist/bookmarks. Typed clients work with client-go's defaults (protobuf bodies, JSON responses; ADR 0014), so the harness needs no content-type override.
    - Budget baselines recorded in `testing/bench` (§4.4: idle RSS, empty-cluster-ready time, fork time).
 
 ### 12.2 Known gaps after steps 1–7
 
-For the next agent; each is either step 7 work or a deliberate deferral.
-- **Protobuf request bodies** (ADR 0010 revisit, needs owner sign-off): blocks `helm install` and kubectl's typed commands.
+For the next agent; each is a deliberate deferral.
+- *(Done, ADR 0014.)* **Protobuf request bodies**: decoded by `kubemu-proto`. Still out: protobuf or CBOR *responses* (every typed client also accepts JSON), protobuf-encoded objects embedded in `RawExtension`, and a compatibility report for refused bodies (they get a `Status`, nothing more).
+- **`helm install` needs `--server-side=false`**: Helm 4 defaults to server-side apply (M3).
+- **kubectl's client-side validation of create-only kinds** (`kubectl create -f` of a SelfSubjectAccessReview) lists CRDs, which aren't served until M3; `--validate=false` works around it.
+- **No `serviceaccounts/token` subresource**, so `kubectl create token` fails (404).
 - **Validation is partial by design** (ADR 0013): metadata for every kind, plus the common pod and Service mistakes. Everything else is accepted unchecked and listed in `UNPORTED`. Notably, pod updates are not checked for spec immutability, and update validation reuses the create rules.
 - *(Done in step 7.)* **Defaulting**: every scheme defaulter for the T0 kinds (`kubemu-validation`), and quantities canonicalized, both fuzzed against the oracle. Not ported: pod-level resource requests (deferred to `PrepareForCreate` upstream), H2C probe protocol (alpha, off).
 - **Go's typed round trip is not emulated**: fields Go drops as omitempty zero values (`hostNetwork: false`, `limits: {}`) stay in kubemu's JSON. Quantities sent as JSON floats in exponent form (`1e3`) canonicalize from serde_json's float text, not the original.
