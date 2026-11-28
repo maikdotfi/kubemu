@@ -32,8 +32,7 @@ fn usage() {
     }
 }
 
-const UP_USAGE: &str =
-    "usage: kubemu up [--cluster NAME] [--host HOST] [--port PORT] [--kubeconfig FILE] [--seed N]";
+const UP_USAGE: &str = "usage: kubemu up [--cluster NAME] [--host HOST] [--port PORT] [--kubeconfig FILE] [--seed N] [--watch-log EVENTS]";
 const KUBECONFIG_USAGE: &str =
     "usage: kubemu kubeconfig [--cluster NAME] [--host HOST] [--port PORT]";
 
@@ -45,6 +44,8 @@ struct Opts {
     port: u16,
     kubeconfig: Option<std::path::PathBuf>,
     seed: Option<u64>,
+    /// Events kept for resuming watches; older resourceVersions get 410.
+    watch_log: usize,
 }
 
 fn parse_opts(args: &[String], allow_up: bool) -> Result<Opts, String> {
@@ -54,6 +55,7 @@ fn parse_opts(args: &[String], allow_up: bool) -> Result<Opts, String> {
         port: 6443,
         kubeconfig: None,
         seed: None,
+        watch_log: kubemu_api::LOG_CAPACITY,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -74,6 +76,13 @@ fn parse_opts(args: &[String], allow_up: bool) -> Result<Opts, String> {
                         .map_err(|_| "--seed needs a number".to_owned())?,
                 )
             }
+            "--watch-log" if allow_up => {
+                o.watch_log = val()?
+                    .parse()
+                    .ok()
+                    .filter(|&n| n > 0)
+                    .ok_or("--watch-log needs a positive number")?
+            }
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -85,9 +94,12 @@ fn up(o: Opts) -> ExitCode {
     let (env, seed) = kubemu_env_real::real_env(o.seed);
     let mut controllers = kubemu_controllers::standard(&env, &o.cluster);
     controllers.push(Box::new(kubemu_scheduler::Scheduler::new(env.clone())));
-    let manager = kubemu_controllers::Manager::new(controllers);
-    let mut api = kubemu_api::Api::new(env);
+    let mut manager = kubemu_controllers::Manager::new(controllers);
+    let mut api = kubemu_api::Api::with_log_capacity(env, o.watch_log);
     api.add_cluster(&o.cluster);
+    // Ready before serving: the node and default ServiceAccounts exist by
+    // the first request (the empty-cluster-ready budget, README §4.4).
+    manager.settle(&mut api, &o.cluster, 100);
     let listener = match kubemu_env_real::net::bind_tcp(&format!("{}:{}", o.host, o.port)) {
         Ok(l) => l,
         Err(e) => {
@@ -108,7 +120,7 @@ fn up(o: Opts) -> ExitCode {
     }
     // Principle 1.6: say loudly what is emulated or missing.
     eprintln!(
-        "kubemu: cluster {:?} serving on {url} (seed {seed})",
+        "kubemu: cluster {:?} ready, serving on {url} (seed {seed})",
         o.cluster
     );
     eprintln!(

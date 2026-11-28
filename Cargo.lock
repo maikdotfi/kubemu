@@ -311,6 +311,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kubemu-bench"
+version = "0.0.0"
+dependencies = [
+ "kubemu-api",
+ "kubemu-controllers",
+ "kubemu-env-real",
+ "kubemu-scheduler",
+ "serde_json",
+]
+
+[[package]]
 name = "kubemu-cli"
 version = "0.0.0"
 dependencies = [

@@ -1,0 +1,9 @@
+{
+  "metrics": {
+    "empty_cluster_ready_ms": 4.112,
+    "fork_10k_objects_us": 0.851,
+    "fork_empty_us": 0.881,
+    "idle_rss_mib": 4.109
+  },
+  "runs": 5
+}

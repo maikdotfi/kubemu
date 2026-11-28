@@ -7,13 +7,15 @@ want=$(sed -n 's/^kubectl *= *"1\.\([0-9]*\)\..*/\1/p' mise.toml)
 [ -n "$want" ] || { echo "no kubectl pin in mise.toml"; exit 1; }
 fail=0
 
+for gomod in testing/oracle-go/go.mod testing/informer-go/go.mod; do
 for mod in k8s.io/api k8s.io/apimachinery k8s.io/client-go; do
-  got=$(sed -n "s|^[[:space:]]*$mod v0\.\([0-9]*\)\..*|\1|p" testing/oracle-go/go.mod | head -1)
+  got=$(sed -n "s|^[[:space:]]*$mod v0\.\([0-9]*\)\..*|\1|p" "$gomod" | head -1)
   if [ -z "$got" ]; then
-    echo "missing $mod in testing/oracle-go/go.mod"; fail=1
+    echo "missing $mod in $gomod"; fail=1
   elif [ "$got" != "$want" ]; then
-    echo "$mod is v0.$got, want v0.$want (kubectl 1.$want in mise.toml)"; fail=1
+    echo "$mod is v0.$got in $gomod, want v0.$want (kubectl 1.$want in mise.toml)"; fail=1
   fi
+done
 done
 
 # The oracle's defaulting and validation come from k8s.io/kubernetes itself

@@ -94,6 +94,39 @@ pub fn spawn_piped(
         .spawn()
 }
 
+/// Processes and pauses for real-mode tools such as the budget benchmarks
+/// (`testing/bench`), which measure `kubemu up` from outside.
+pub mod process {
+    /// Spawns `program` with null stdin and stdout and piped stderr.
+    pub fn spawn_stderr_piped(
+        program: &std::path::Path,
+        args: &[&str],
+    ) -> std::io::Result<std::process::Child> {
+        std::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+    }
+
+    /// Resident set size of a live process in bytes, from `/proc` (Linux).
+    pub fn rss_bytes(pid: u32) -> std::io::Result<u64> {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status"))?;
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix("VmRSS:"))
+            .and_then(|v| v.trim().strip_suffix("kB"))
+            .and_then(|kb| kb.trim().parse::<u64>().ok())
+            .map(|kb| kb * 1024)
+            .ok_or_else(|| std::io::Error::other("no VmRSS in /proc status"))
+    }
+
+    pub fn sleep(d: std::time::Duration) {
+        std::thread::sleep(d);
+    }
+}
+
 /// File access for build scripts (`build.rs`), which run at compile time
 /// and so sit outside the runtime determinism boundary, but are linted like
 /// everything else. Not for runtime code.
@@ -152,6 +185,23 @@ pub mod net {
         let s = std::net::TcpStream::connect(addr)?;
         s.set_nonblocking(true)?;
         Ok(s)
+    }
+
+    /// A blocking `GET` over a fresh connection; returns the status code
+    /// (readiness probes in real-mode tools).
+    pub fn http_get_status(addr: std::net::SocketAddr, path: &str) -> std::io::Result<u16> {
+        use std::io::{Read, Write};
+        let mut s = std::net::TcpStream::connect(addr)?;
+        write!(
+            s,
+            "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+        )?;
+        let mut head = [0u8; 12];
+        s.read_exact(&mut head)?;
+        std::str::from_utf8(&head[9..12])
+            .ok()
+            .and_then(|c| c.parse().ok())
+            .ok_or_else(|| std::io::Error::other("malformed HTTP status line"))
     }
 }
 

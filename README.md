@@ -2,7 +2,7 @@
 
 > **kubemu** (pronounced *kube emu*) is a single Rust binary that emulates enough of Kubernetes to deploy and test real workloads (app, database, ingress, operators) across multiple clusters, in CI or locally. It uses a fraction of the resources of kind/k3s, and seeded fault injection is a first-class feature.
 
-> **Status: M1 in progress (§12.1 steps 1–7 done; 8 left).** Done: M0, plus vendored upstream OpenAPI (v1.37.3) with the generated resource table and schema arena (`kubemu-api-types`); JSON patch and strategic merge patch ported from the apiserver's Go code and differentially fuzzed against the Go oracle; the synchronous `kubemu-api` frontend (discovery, OpenAPI, CRUD/patch/watch with resourceVersion semantics, selectors, pagination, `/status`, `/binding`, `/finalize`, finalizers, namespace lifecycle); controllers (GC, namespace, ServiceAccount, Endpoints/EndpointSlice, a simulated kubelet and node) and a trivial scheduler, all under DST with end-state invariants; the HTTP shell plus `kubemu up`/`kubemu kubeconfig`, with a kubectl smoke test in CI; `kubemu-validation` (ADR 0013): quantities, every T0 defaulter, and pod/Service validation for common mistakes, all fuzzed against `k8s.io/kubernetes` itself; and `kubemu-proto` (ADR 0014): protobuf request bodies from typed clients decoded to JSON through a wire table generated from the Go types, fuzzed against Go's own protobuf round trip, so kubectl's typed commands (`create configmap|secret|namespace`, `auth can-i`) and `helm install|upgrade|uninstall --server-side=false` work (smoke-tested in CI). **Next agent: §12.1 step 8 (informer harness, budget baselines).**
+> **Status: M1 done (§12.1 steps 1–8).** Done: M0, plus vendored upstream OpenAPI (v1.37.3) with the generated resource table and schema arena (`kubemu-api-types`); JSON patch and strategic merge patch ported from the apiserver's Go code and differentially fuzzed against the Go oracle; the synchronous `kubemu-api` frontend (discovery, OpenAPI, CRUD/patch/watch with resourceVersion semantics, selectors, pagination, `/status`, `/binding`, `/finalize`, finalizers, namespace lifecycle); controllers (GC, namespace, ServiceAccount, Endpoints/EndpointSlice, a simulated kubelet and node) and a trivial scheduler, all under DST with end-state invariants; the HTTP shell plus `kubemu up`/`kubemu kubeconfig`, with a kubectl smoke test in CI; `kubemu-validation` (ADR 0013): quantities, every T0 defaulter, and pod/Service validation for common mistakes, all fuzzed against `k8s.io/kubernetes` itself; and `kubemu-proto` (ADR 0014): protobuf request bodies from typed clients decoded to JSON through a wire table generated from the Go types, fuzzed against Go's own protobuf round trip, so kubectl's typed commands (`create configmap|secret|namespace`, `auth can-i`) and `helm install|upgrade|uninstall --server-side=false` work (smoke-tested in CI); a client-go informer harness (`testing/informer-go`) and budget baselines (`testing/bench`: 4 MiB idle RSS, 4 ms to ready, forks under 1 µs). **Next agent: M2 (needs ADRs 0003–0005 signed off first, §14).**
 
 **Developing**
 ```sh
@@ -313,10 +313,10 @@ M1 follows ADRs [0010](docs/adr/0010-object-model-and-wire-format.md) (JSON obje
 7. *(Done.)* **Validation and defaulting (ADR 0013).** `testing/oracle-go` imports `k8s.io/kubernetes` v1.37.3 and answers `quantity`, `default`, `validate` (through `rest.BeforeCreate` with the registry strategies) and `strategy`. `kubemu-validation` ports quantities, all T0 defaulters, and the pod and Service rules people trip over; each is fuzzed with messages compared. What is not ported is listed in `kubemu_validation::validation::UNPORTED`, for the compatibility report.
 8. **Exit criteria.**
    - *(Done.)* A kubectl smoke test in CI: `get`, `apply`, `delete`, `watch` against `kubemu up` (`scripts/kubectl-smoke.sh`).
-   - An informer harness (client-go 1.37) for list/watch/relist/bookmarks. Typed clients work with client-go's defaults (protobuf bodies, JSON responses; ADR 0014), so the harness needs no content-type override.
-   - Budget baselines recorded in `testing/bench` (§4.4: idle RSS, empty-cluster-ready time, fork time).
+   - *(Done.)* An informer harness (client-go 1.37, default settings): `testing/informer-go` (`mise run informer`). It runs shared informers (all ConfigMaps, a label selector, one namespace, pods, namespaces) against `kubemu up --watch-log 200` while writers churn and a seeded injector fails requests, delays watches and cuts streams (both mid-stream and cleanly). It checks that caches converge on the server, that handler state matches the cache, and that resourceVersions never go backwards. The run must include watch-lists (client-go's default since 1.35), resumed watches, 410s with relists, and bookmarks.
+   - *(Done.)* Budget baselines in `testing/bench` (`mise run bench`, gating in CI): idle RSS, empty-cluster-ready time, fork time. `kubemu up` now settles its controllers before serving, so "ready" means the node and default ServiceAccounts exist.
 
-### 12.2 Known gaps after steps 1–7
+### 12.2 Known gaps after M1
 
 For the next agent; each is a deliberate deferral.
 - *(Done, ADR 0014.)* **Protobuf request bodies**: decoded by `kubemu-proto`. Still out: protobuf or CBOR *responses* (every typed client also accepts JSON), protobuf-encoded objects embedded in `RawExtension`, and a compatibility report for refused bodies (they get a `Status`, nothing more).
@@ -333,6 +333,8 @@ For the next agent; each is a deliberate deferral.
 - **Controllers scan everything each round** (O(objects)); fine at test scale, replace with informers/work queues when benchmarks say so.
 - **No `kube-root-ca.crt` ConfigMap or `kubernetes` Service** in namespaces (need TLS and service IPs).
 - **Single cluster per `kubemu up`**, plain HTTP, no auth (ADR 0011).
+- **Informer harness is not replayable**: faults are seeded, but their interleaving with the real server is not, so a failing seed may not repeat. It runs on every merge for 20 s; long nightly runs wait for the nightly pipeline. Periodic bookmarks (once a minute) are not reached in 20 s; only `initial-events-end` bookmarks are.
+- **Benchmarks gate time by budget only**; RSS also against the baseline (+25%). A per-runner trend report waits for the self-hosted runners (ADR 0008).
 
 ---
 

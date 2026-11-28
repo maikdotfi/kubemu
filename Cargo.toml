@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "testing/sim", "testing/oracle-fuzz"]
-default-members = ["crates/*", "testing/sim", "testing/oracle-fuzz"]
+members = ["crates/*", "testing/sim", "testing/oracle-fuzz", "testing/bench"]
+default-members = ["crates/*", "testing/sim", "testing/oracle-fuzz", "testing/bench"]
 
 [workspace.package]
 version = "0.0.0"

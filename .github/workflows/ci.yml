@@ -68,3 +68,34 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: kubectl and helm smoke test
         run: scripts/kubectl-smoke.sh
+
+  informer:
+    # M1 exit criterion: client-go informers (default settings) converge
+    # through list, watch, relist after 410 and bookmarks, under faults.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v3
+        with:
+          install_args: go
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: go vet
+        working-directory: testing/informer-go
+        run: go vet ./...
+      - name: informer harness
+        run: mise run informer
+
+  bench:
+    # Resource and latency budgets (README §4.4, testing/bench).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: budgets
+        run: |
+          cargo build -q --release -p kubemu-cli -p kubemu-bench
+          target/release/kubemu-bench --kubemu target/release/kubemu

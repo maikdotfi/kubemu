@@ -64,11 +64,35 @@ run = "scripts/check-core-deps.sh"
 description = "kubectl and helm smoke test against `kubemu up` (needs kubectl and helm from mise)"
 run = "scripts/kubectl-smoke.sh"
 
+[tasks.build-kubemu]
+run = "cargo build -q -p kubemu-cli"
+
+[tasks.informer]
+description = "client-go informer harness against `kubemu up`: mise run informer -- -seed 7 -duration 5m"
+depends = ["build-kubemu"]
+dir = "testing/informer-go"
+run = "go run . -kubemu ../../target/debug/kubemu"
+
+[tasks.bench]
+description = "Budget benchmarks (README §4.4), checked against testing/bench/baseline.json"
+run = [
+  "cargo build -q --release -p kubemu-cli -p kubemu-bench",
+  "target/release/kubemu-bench --kubemu target/release/kubemu",
+]
+
+[tasks.bench-record]
+description = "Re-record testing/bench/baseline.json on this machine"
+run = [
+  "cargo build -q --release -p kubemu-cli -p kubemu-bench",
+  "target/release/kubemu-bench --kubemu target/release/kubemu --record > target/baseline.json",
+  "mv target/baseline.json testing/bench/baseline.json",
+]
+
 [tasks.pins]
 description = "Check that all Kubernetes pins target one minor (ADR 0007)"
 run = "scripts/check-k8s-pins.sh"
 
 [tasks.ci]
 description = "Everything the PR pipeline runs locally"
-depends = ["lint", "test", "oracle", "pins", "core-deps", "fuzz", "openapi-v2-pb-check", "smoke"]
+depends = ["lint", "test", "oracle", "pins", "core-deps", "fuzz", "openapi-v2-pb-check", "smoke", "informer", "bench"]
 run = "cargo run -q -p kubemu-sim -- --seeds 1000 --check-determinism"
