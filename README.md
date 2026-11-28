@@ -2,7 +2,7 @@
 
 > **kubemu** (pronounced *kube emu*) is a single Rust binary that emulates enough of Kubernetes to deploy and test real workloads (app, database, ingress, operators) across multiple clusters, in CI or locally. It uses a fraction of the resources of kind/k3s, and seeded fault injection is a first-class feature.
 
-> **Status: M1 done (§12.1 steps 1–8).** Done: M0, plus vendored upstream OpenAPI (v1.37.3) with the generated resource table and schema arena (`kubemu-api-types`); JSON patch and strategic merge patch ported from the apiserver's Go code and differentially fuzzed against the Go oracle; the synchronous `kubemu-api` frontend (discovery, OpenAPI, CRUD/patch/watch with resourceVersion semantics, selectors, pagination, `/status`, `/binding`, `/finalize`, finalizers, namespace lifecycle); controllers (GC, namespace, ServiceAccount, Endpoints/EndpointSlice, a simulated kubelet and node) and a trivial scheduler, all under DST with end-state invariants; the HTTP shell plus `kubemu up`/`kubemu kubeconfig`, with a kubectl smoke test in CI; `kubemu-validation` (ADR 0013): quantities, every T0 defaulter, and pod/Service validation for common mistakes, all fuzzed against `k8s.io/kubernetes` itself; and `kubemu-proto` (ADR 0014): protobuf request bodies from typed clients decoded to JSON through a wire table generated from the Go types, fuzzed against Go's own protobuf round trip, so kubectl's typed commands (`create configmap|secret|namespace`, `auth can-i`) and `helm install|upgrade|uninstall --server-side=false` work (smoke-tested in CI); a client-go informer harness (`testing/informer-go`) and budget baselines (`testing/bench`: 4 MiB idle RSS, 4 ms to ready, forks under 1 µs). **Next agent: M2 (needs ADRs 0003–0005 signed off first, §14).**
+> **Status: M1 done (§12.1 steps 1–8).** Done: M0, plus vendored upstream OpenAPI (v1.37.3) with the generated resource table and schema arena (`kubemu-api-types`); JSON patch and strategic merge patch ported from the apiserver's Go code and differentially fuzzed against the Go oracle; the synchronous `kubemu-api` frontend (discovery, OpenAPI, CRUD/patch/watch with resourceVersion semantics, selectors, pagination, `/status`, `/binding`, `/finalize`, finalizers, namespace lifecycle); controllers (GC, namespace, ServiceAccount, Endpoints/EndpointSlice, a simulated kubelet and node) and a trivial scheduler, all under DST with end-state invariants; the HTTP shell plus `kubemu up`/`kubemu kubeconfig`, with a kubectl smoke test in CI; `kubemu-validation` (ADR 0013): quantities, every T0 defaulter, and pod/Service validation for common mistakes, all fuzzed against `k8s.io/kubernetes` itself; and `kubemu-proto` (ADR 0014): protobuf request bodies from typed clients decoded to JSON through a wire table generated from the Go types, fuzzed against Go's own protobuf round trip, so kubectl's typed commands (`create configmap|secret|namespace`, `auth can-i`) and `helm install|upgrade|uninstall --server-side=false` work (smoke-tested in CI); a client-go informer harness (`testing/informer-go`) and budget baselines (`testing/bench`: 4 MiB idle RSS, 4 ms to ready, forks under 1 µs). **Next agent: M2, following §12.3; ADRs 0003–0005 are accepted (§14).**
 
 **Developing**
 ```sh
@@ -151,7 +151,7 @@ Design: a **synchronous deterministic core plus a tokio shell**, modelled on Tur
   - `SimExecutor`: fake pods inside DST.
   - Experimental executors later (ptrace/seccomp-controlled, WASM).
 - Use seccomp-unotify for targeted syscall interception, with fault hooks and L2 experiments built on top.
-- **Privilege modes:** rootful (the CI default; simplest and fastest) and rootless (later, for local use). Write an ADR up front.
+- **Privileges:** kubemu runs as root to start real pods; protecting the host from workloads is not a goal ([ADR 0004](docs/adr/0004-rootful-first.md)). No rootless mode is planned.
 - No cgroup limits by default. Use one cgroup per cluster only for accounting and cleanup.
 
 ### 4.2 Images: where the CoW/DAX ideas pay off
@@ -298,7 +298,7 @@ Every failure found anywhere (DST, fuzzing, corpus) becomes a permanent regressi
 | **M4: Snapshots + faults (L1)** | Snapshot/fork, `FaultSchedule`, all injection points, replay, reports | Scenario fork < budget; fault replay identical across runs; example BDD suite with chaos |
 | **M5: Multi-cluster + T3** | Cross-cluster networking/partitions, RBAC, NetworkPolicy, StorageClass | Multi-cluster failover example; RBAC conformance subset |
 | **M6: Public alpha** | Docs, GitHub Action, helpers, published compatibility dashboard | External users run it in CI |
-| **Research tracks** | L2 workload determinism, rootless mode, lazy pulling, object-storage-backed snapshots and volumes | Spikes with ADRs |
+| **Research tracks** | L2 workload determinism, lazy pulling, object-storage-backed snapshots and volumes | Spikes with ADRs |
 
 ### 12.1 M1 work plan
 
@@ -338,6 +338,21 @@ For the next agent; each is a deliberate deferral.
 
 ---
 
+### 12.3 M2 work plan
+
+M2 follows ADRs [0003](docs/adr/0003-pod-networking.md) (netns+veth, per-cluster bridge, IPAM in the core), [0004](docs/adr/0004-rootful-first.md) (root is expected; only real pods need it) and [0005](docs/adr/0005-image-format.md) (plain overlay over a content-addressed layer store). Read them first. Deterministic steps come first, so they run under DST anywhere; privileged steps run in a CI job with `sudo -E` (ADR 0004). Suggested order, each step landing green on `mise run ci`:
+
+1. **Service and pod IPs (core).** Per-cluster pod and Service CIDRs in the cluster config. Allocate `clusterIP`/`clusterIPs` on Service create (honouring a requested IP, `None` for headless, the `ipFamilies` defaults) and free them on delete; the `kubernetes` Service in `default`. Pod IPs from the pod CIDR, allocated when a pod starts, not hard-coded in `SimKubelet`. Allocations live in the store so forks carry them. Oracle-check what users observe (ADR 0013). DST invariant: no two live objects share an IP.
+2. **Workload controllers (core).** Serve `apps/v1` and `batch/v1` from the vendored schemas; T1 defaulting and the common validation mistakes, oracle-checked. Then Deployment, ReplicaSet, StatefulSet, DaemonSet, Job and CronJob as `reconcile -> Vec<Action>`, under DST with invariants (desired replicas reached, rollouts finish, no orphaned pods).
+3. **Pod lifecycle in the core.** Generalise `SimKubelet` into a pod state machine (init containers, restart policy and back-off, probes, container statuses, graceful termination) that issues commands to a `WorkloadExecutor` trait. `SimExecutor` implements it for DST; nothing else in the lifecycle changes when the real executor arrives.
+4. **Image store (`kubemu-image`, ADR 0005).** Registry client (anonymous and token auth, multi-arch index), content-addressed blob and layer store with a version file, layer extraction with whiteouts. Unit-tested on local OCI-layout fixtures; a real pull runs in CI.
+5. **Real executor (`kubemu-runtime`, ADR 0004).** The zygote (README §2.1) lands first: fork before tokio starts. Then youki's `libcontainer`: overlay rootfs, namespaces, process lifecycle, exit codes, container logs to files. Privileged CI job running a real pod.
+6. **Pod networking (`kubemu-net`, ADR 0003).** Bridge, veth and netns per pod through netlink; the userspace Service proxy on `clusterIP:port` and NodePorts; cluster DNS on the bridge gateway (hickory); egress masquerade. Startup cleanup of leftover `kmu*` links.
+7. **Streaming.** `logs` (follow, previous, tail), `exec`, `attach` and `port-forward` over the protocols kubectl 1.37 uses (WebSocket by default, SPDY fallback).
+8. **Ingress (`kubemu-ingress`).** IngressClass, host and path routing, TLS from Secrets, one host port per cluster; stands aside for IngressClasses it doesn't own.
+9. **Dir-backed PVCs.** PVCs bound to per-cluster directories, access modes in metadata only (§8).
+10. **Exit criteria.** A reference chart (app + real Postgres + ingress) installs with Helm and serves traffic through the ingress in CI; `kubectl logs|exec|port-forward` in the smoke test; the §4.4 budgets measured for it in `testing/bench`.
+
 ## 13. Risks and mitigations
 
 | Risk | Mitigation |
@@ -353,18 +368,18 @@ For the next agent; each is a deliberate deferral.
 ---
 
 ## 14. Decisions to write as ADRs first
-ADRs live in [`docs/adr/`](docs/adr/). **Every ADR that M0 and M1 need is accepted, so M1 can start.** The others aren't written yet and need sign-off before their milestone starts.
+ADRs live in [`docs/adr/`](docs/adr/). **Every ADR that M0, M1 and M2 need is accepted, so M2 can start.** The others aren't written yet and need sign-off before their milestone starts.
 
 | # | Decision | Status | Needed by |
 |---|---|---|---|
 | [0001](docs/adr/0001-sim-executor.md) | Determinism model: synchronous deterministic core + tokio shell (Turso-style) | **Accepted** | M0 |
 | [0002](docs/adr/0002-store-snapshots-and-watch-cache.md) | Store: `imbl::OrdMap` for O(1) fork, per-cluster watch log | **Accepted** | M0 |
-| [0003](docs/adr/0003-pod-networking.md) | Pod networking default: netns+veth vs the loopback+seccomp experimental mode | Proposed, not written | M2 |
-| [0004](docs/adr/0004-rootful-first.md) | Rootful-first privilege model | Proposed, not written | M2 |
-| [0005](docs/adr/0005-image-format.md) | Image format: EROFS/composefs vs plain overlay for v1 | Proposed, not written | M2 |
+| [0003](docs/adr/0003-pod-networking.md) | Pod networking: netns+veth to a per-cluster bridge, IPAM in the core, Service IPs on the bridge for the userspace proxy | **Accepted** | M2 |
+| [0004](docs/adr/0004-rootful-first.md) | Rootful privilege model: root is expected, host protection is not a goal | **Accepted** | M2 |
+| [0005](docs/adr/0005-image-format.md) | Image format: plain overlay over a content-addressed layer store for v1; EROFS later | **Accepted** | M2 |
 | [0006](docs/adr/0006-turso-boundary.md) | Turso integration boundary: in-process API, connection model, how substitution is declared | Proposed, not written | M3 |
 | [0007](docs/adr/0007-k8s-version-policy.md) | Kubernetes version policy: single target minor, **1.37** | **Accepted** | M0 |
-| [0008](docs/adr/0008-ci-forge.md) | CI forge: GitHub Actions; hosted runners now, self-hosted later | **Accepted** | M0 |
+| [0008](docs/adr/0008-ci-forge.md) | CI forge: GitHub Actions; hosted runners now, self-hosted later | **Accepted**; root trigger amended by 0004 | M0 |
 | [0009](docs/adr/0009-license-and-naming.md) | License and naming (check that "kubemu" is free on crates.io and GitHub) | Proposed, not written | M6 |
 | [0010](docs/adr/0010-object-model-and-wire-format.md) | Object model: JSON values in the store, JSON-only wire format | **Accepted**; wire format amended by 0014 | M1 |
 | [0011](docs/adr/0011-api-server-shell.md) | API server: synchronous `kubemu-api` frontend + thin tokio HTTP shell (Turso-style), plain HTTP, multi-cluster deferred | **Accepted** | M1 |

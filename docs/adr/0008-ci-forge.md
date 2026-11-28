@@ -1,6 +1,6 @@
 # 0008: Forge choice for CI
 
-- Status: Accepted (signed off by the project owner, 2026-11-27)
+- Status: Accepted (signed off by the project owner, 2026-11-27); root trigger amended by 0004
 - Date: 2026-11-27
 
 ## Context
@@ -28,3 +28,4 @@ See README §11. GitHub self-hosted runners vs Forgejo. The scaffold starts on G
 - Workflows target labels so jobs can move between hosted and self-hosted runners without rewrites. Hosted jobs use `ubuntu-latest`; jobs that need privileges will use `[self-hosted, linux, kubemu-sandbox]`.
 - Public repo plus self-hosted runners is risky: fork PRs could run code on the server. Before adding the first self-hosted runner, restrict it to pushes on `main` (and approved workflows) and never run fork PRs on it.
 - The "CI on the server" item in M0 is satisfied by hosted CI for now and revisited at M2.
+- *Amended by [0004](0004-rootful-first.md):* needing root no longer by itself moves jobs to self-hosted runners. Hosted runners have passwordless `sudo` and a fresh VM per job, so privileged M2 jobs run there with `sudo`.
