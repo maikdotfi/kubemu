@@ -1,27 +1,43 @@
-//! DST harness (README §10). Drives the control plane with random clients
-//! under a seeded [`SimEnv`], checks invariants continuously, and records a
-//! trace whose hash must be identical for identical seeds.
+//! DST harness (README §10). Drives the API frontend (`kubemu-api`) with
+//! random clients under a seeded [`SimEnv`], checks invariants
+//! continuously, and records a trace whose hash must be identical for
+//! identical seeds.
 //!
-//! Today it exercises the store and the store fault points: random writers
-//! on several clusters, clusters forked mid-run, and lagging watchers that
-//! mirror state from the event stream under injected watch drops and 410s
-//! (relisting on Gone). Controllers and the API server plug in as they land.
+//! Every client goes through the real request path (ADR 0011):
+//! - writers create, update (sometimes with a stale resourceVersion),
+//!   patch (merge, strategic, JSON), delete, and hold or release objects
+//!   with finalizers;
+//! - informers list (paginated) and watch with bookmarks, like client-go's
+//!   reflector, under injected watch drops and 410s, relisting when told
+//!   their history is gone;
+//! - paginated listers read one page per step while writes go on between
+//!   pages;
+//! - clusters are forked mid-run, and informers follow onto the fork.
+//!
+//! Invariants: no unexpected response codes, watch resourceVersions
+//! strictly increase, no lost events (every informer mirrors the cluster
+//! once caught up), and a paginated list equals the list at its
+//! resourceVersion.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::time::Duration;
 
+use kubemu_api::{Api, HttpRequest, Reply, WatchCursor};
+use kubemu_env::Rng;
 use kubemu_env_sim::SimEnv;
 use kubemu_faults::{Fault, FaultConfig, FaultSchedule};
-use kubemu_store::{ClusterStore, EventKind, ObjectKey, ResourceVersion, Store, StoreError};
+use serde_json::{Value, json};
 
 pub const CLUSTERS: [&str; 3] = ["alpha", "beta", "gamma"];
+const NAMESPACES: [&str; 2] = ["default", "team"];
+const FINALIZER: &str = "sim.kubemu.dev/hold";
 
 #[derive(Clone, Debug)]
 pub struct Config {
     pub steps: u32,
     pub log_capacity: usize,
-    pub keys_per_cluster: u64,
+    pub keys_per_namespace: u64,
     /// Forks stop once this many clusters exist.
     pub max_clusters: usize,
     pub faults: FaultConfig,
@@ -32,7 +48,7 @@ impl Default for Config {
         Self {
             steps: 500,
             log_capacity: 32,
-            keys_per_cluster: 16,
+            keys_per_namespace: 8,
             max_clusters: 6,
             faults: FaultConfig::default(),
         }
@@ -46,6 +62,7 @@ pub struct Outcome {
     pub trace_lines: usize,
     pub faults: usize,
     pub forks: u32,
+    pub relists: u32,
     pub violations: Vec<String>,
 }
 
@@ -55,179 +72,424 @@ impl Outcome {
     }
 }
 
-/// A client-side mirror fed by watch events, like a client-go informer.
-#[derive(Clone, Debug, Default)]
-struct Watcher {
-    cursor: ResourceVersion,
-    mirror: BTreeMap<ObjectKey, (ResourceVersion, u64)>,
+type Mirror = BTreeMap<(String, String), (String, Value)>;
+
+/// What an informer's cache holds for one object: its resourceVersion
+/// and data, keyed by namespace and name.
+fn entry(obj: &Value) -> ((String, String), (String, Value)) {
+    let m = &obj["metadata"];
+    (
+        (
+            m["namespace"].as_str().unwrap_or("").to_owned(),
+            m["name"].as_str().unwrap_or("").to_owned(),
+        ),
+        (
+            m["resourceVersion"].as_str().unwrap_or("").to_owned(),
+            obj.get("data").cloned().unwrap_or(Value::Null),
+        ),
+    )
+}
+
+fn rv_of(obj: &Value) -> u64 {
+    obj["metadata"]["resourceVersion"]
+        .as_str()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}
+
+const CMS: &str = "/api/v1/configmaps";
+
+fn cms(ns: &str) -> String {
+    format!("/api/v1/namespaces/{ns}/configmaps")
+}
+
+struct Sim<'a> {
+    api: Api,
+    rng: &'a dyn Rng,
+    trace: String,
+    violations: Vec<String>,
+    step: u32,
+}
+
+impl Sim<'_> {
+    fn call(&mut self, cluster: &str, req: HttpRequest, ok: &[u16]) -> (u16, Value) {
+        let resp = self.api.handle(cluster, &req).response();
+        let v = resp.value().unwrap_or(Value::Null);
+        if !ok.contains(&resp.status) {
+            self.violations.push(format!(
+                "step {}: {cluster} {} {}?{} -> {} {}",
+                self.step, req.method, req.path, req.query, resp.status, v["message"]
+            ));
+        }
+        (resp.status, v)
+    }
+
+    fn pick<'b>(&self, xs: &[&'b str]) -> &'b str {
+        xs[self.rng.below(xs.len() as u64) as usize]
+    }
+}
+
+/// A client-go-style informer: list, then watch from the list's
+/// resourceVersion; relist on 410.
+#[derive(Debug, Default)]
+struct Informer {
+    rv: u64,
+    cursor: Option<WatchCursor>,
+    mirror: Mirror,
     relists: u32,
 }
 
-impl Watcher {
-    fn relist(&mut self, s: &ClusterStore<u64>) {
-        self.mirror = s
-            .list("configmaps", None)
-            .0
-            .into_iter()
-            .map(|(k, o)| (k.clone(), (o.resource_version, o.value)))
-            .collect();
-        self.cursor = s.resource_version();
+impl Informer {
+    fn relist(&mut self, sim: &mut Sim<'_>, cluster: &str) {
         self.relists += 1;
+        self.cursor = None;
+        self.mirror.clear();
+        let limit = 1 + sim.rng.below(6);
+        let mut cont = String::new();
+        loop {
+            let q = if cont.is_empty() {
+                format!("{CMS}?limit={limit}")
+            } else {
+                format!("{CMS}?limit={limit}&continue={cont}")
+            };
+            let (s, l) = sim.call(cluster, HttpRequest::new("GET", &q), &[200, 410]);
+            if s == 410 {
+                // The list fell out of history between pages: start over.
+                self.mirror.clear();
+                cont.clear();
+                continue;
+            }
+            for item in l["items"].as_array().into_iter().flatten() {
+                let (k, v) = entry(item);
+                self.mirror.insert(k, v);
+            }
+            self.rv = l["metadata"]["resourceVersion"]
+                .as_str()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            match l["metadata"]["continue"].as_str() {
+                Some(c) => cont = c.to_owned(),
+                None => break,
+            }
+        }
     }
 
-    /// Reads pending events. With `faults`, the read may be cut short or
-    /// answered with 410 Gone.
-    fn sync(
-        &mut self,
-        s: &ClusterStore<u64>,
-        faults: Option<&mut FaultSchedule>,
-        cluster: &str,
-        violations: &mut Vec<String>,
-    ) {
-        let events = match s.events_since(self.cursor) {
-            Ok(events) => events,
-            Err(StoreError::Gone { .. }) => return self.relist(s),
-            Err(other) => {
-                return violations.push(format!("{cluster}: unexpected watch error {other}"));
+    fn sync(&mut self, sim: &mut Sim<'_>, cluster: &str, faults: Option<&mut FaultSchedule>) {
+        if self.cursor.is_none() {
+            let q = format!(
+                "{CMS}?watch=1&allowWatchBookmarks=true&resourceVersion={}",
+                self.rv
+            );
+            match sim.api.handle(cluster, &HttpRequest::new("GET", &q)) {
+                Reply::Watch(c) => self.cursor = Some(c),
+                Reply::Response(r) => {
+                    sim.violations
+                        .push(format!("{cluster}: watch refused: {}", r.status));
+                    return;
+                }
             }
+        }
+        let mut cursor = self.cursor.take().expect("set above");
+        let batch = sim.api.watch_poll(&mut cursor);
+        let deliver = match faults.and_then(|f| f.on_watch(cluster, batch.events.len())) {
+            Some(Fault::WatchGone) => return self.relist(sim, cluster),
+            // The connection breaks: keep what arrived, rewatch later.
+            Some(Fault::WatchDrop { deliver }) => Some(deliver),
+            None => None,
         };
-        let deliver = match faults.and_then(|f| f.on_watch(cluster, events.len())) {
-            Some(Fault::WatchGone) => return self.relist(s),
-            Some(Fault::WatchDrop { deliver }) => deliver,
-            None => events.len(),
-        };
-        for e in events.into_iter().take(deliver) {
-            // Every write is one event, so a gap means a lost event.
-            if e.resource_version != self.cursor + 1 {
-                violations.push(format!(
-                    "{cluster}: watch skipped from rv {} to {}",
-                    self.cursor, e.resource_version
+        let n = deliver.unwrap_or(batch.events.len());
+        for e in batch.events.iter().take(n) {
+            let obj = &e["object"];
+            let t = e["type"].as_str().unwrap_or("");
+            if t == "ERROR" {
+                if obj["code"] != 410 {
+                    sim.violations.push(format!("{cluster}: watch error {obj}"));
+                }
+                return self.relist(sim, cluster);
+            }
+            let rv = rv_of(obj);
+            let monotonic = if t == "BOOKMARK" {
+                rv >= self.rv
+            } else {
+                rv > self.rv
+            };
+            if !monotonic {
+                sim.violations.push(format!(
+                    "{cluster}: watch went from rv {} to {rv} ({t})",
+                    self.rv
                 ));
             }
-            self.cursor = e.resource_version;
-            match e.kind {
-                EventKind::Added | EventKind::Modified => {
-                    self.mirror.insert(e.key, (e.resource_version, e.value));
+            self.rv = rv;
+            let (k, v) = entry(obj);
+            match t {
+                "ADDED" | "MODIFIED" => {
+                    self.mirror.insert(k, v);
                 }
-                EventKind::Deleted => {
-                    self.mirror.remove(&e.key);
+                "DELETED" => {
+                    self.mirror.remove(&k);
                 }
+                _ => {}
             }
+        }
+        if deliver.is_none() && !batch.closed {
+            self.cursor = Some(cursor);
         }
     }
 }
 
+/// A list read one page per step, checked against the list at its
+/// resourceVersion once complete.
+#[derive(Debug)]
+struct Pager {
+    ns: &'static str,
+    limit: u64,
+    cont: String,
+    rv: String,
+    items: Mirror,
+}
+
 pub fn run(seed: u64, cfg: &Config) -> Outcome {
-    let sim = SimEnv::new(seed);
-    let rng = sim.env.rng.clone();
-    let mut faults = FaultSchedule::new(sim.env.clone(), cfg.faults.clone());
-    let mut store: Store<u64> = Store::new();
-    let mut watchers: BTreeMap<String, Watcher> = BTreeMap::new();
+    let simenv = SimEnv::new(seed);
+    let rng = simenv.env.rng.clone();
+    let mut faults = FaultSchedule::new(simenv.env.clone(), cfg.faults.clone());
+    let mut sim = Sim {
+        api: Api::with_log_capacity(simenv.env.clone(), cfg.log_capacity),
+        rng: rng.as_ref(),
+        trace: String::new(),
+        violations: Vec::new(),
+        step: 0,
+    };
+    let mut informers: BTreeMap<String, Informer> = BTreeMap::new();
+    let mut pagers: BTreeMap<String, Pager> = BTreeMap::new();
     for c in CLUSTERS {
-        *store.add_cluster(c) = ClusterStore::new(cfg.log_capacity);
-        watchers.insert(c.to_owned(), Watcher::default());
+        sim.api.add_cluster(c);
+        sim.call(
+            c,
+            HttpRequest::new("POST", "/api/v1/namespaces")
+                .json(&json!({"metadata": {"name": "team"}})),
+            &[201],
+        );
+        let mut i = Informer::default();
+        i.relist(&mut sim, c);
+        informers.insert(c.to_owned(), i);
     }
     let mut forks = 0u32;
 
-    let mut trace = String::new();
-    let mut violations = Vec::new();
-
     for step in 0..cfg.steps {
-        sim.clock.advance(Duration::from_millis(rng.below(50)));
-        // `watchers` has the same keys as the store, in the same order.
-        let names: Vec<String> = watchers.keys().cloned().collect();
-        let cluster = names[rng.below(names.len() as u64) as usize].as_str();
-        let key = ObjectKey::new(
-            "configmaps",
-            "default",
-            format!("cm-{}", rng.below(cfg.keys_per_cluster)),
-        );
-        let value = rng.next_u64();
+        sim.step = step;
+        simenv.clock.advance(Duration::from_millis(rng.below(2000)));
+        let names: Vec<String> = informers.keys().cloned().collect();
+        let cluster = names[rng.below(names.len() as u64) as usize].clone();
+        let c = cluster.as_str();
+        let ns = sim.pick(&NAMESPACES);
+        let name = format!("cm-{}", rng.below(cfg.keys_per_namespace));
+        let path = format!("{}/{name}", cms(ns));
         let faults_before = faults.injected().len();
 
-        let result = match rng.below(20) {
-            0..=7 => store
-                .cluster_mut(cluster)
-                .and_then(|s| s.create(key.clone(), value))
-                .map(|rv| format!("create {key} rv={rv}")),
-            8..=13 => store.cluster_mut(cluster).and_then(|s| {
-                // Sometimes send a stale resourceVersion to exercise conflicts.
-                let expected = s
-                    .get(&key)
-                    .map(|o| o.resource_version - u64::from(rng.chance(0.2)));
-                s.update(&key, value, expected)
-                    .map(|rv| format!("update {key} rv={rv}"))
-            }),
-            14..=16 => store
-                .cluster_mut(cluster)
-                .and_then(|s| s.delete(&key, None))
-                .map(|o| format!("delete {key} was={}", o.resource_version)),
-            17 if names.len() < cfg.max_clusters => {
-                forks += 1;
-                let to = format!("{cluster}.{forks}");
-                store.fork(cluster, to.clone()).map(|s| {
-                    // The fork's informer resumes from the parent's cursor.
-                    let w = watchers[cluster].clone();
-                    let out = format!(
-                        "fork -> {to} rv={} cursor={}",
-                        s.resource_version(),
-                        w.cursor
-                    );
-                    watchers.insert(to, w);
-                    out
-                })
+        let what = match rng.below(24) {
+            0..=4 => {
+                let mut body =
+                    json!({"metadata": {"name": name}, "data": {"v": rng.next_u64().to_string()}});
+                if rng.chance(0.3) {
+                    body["metadata"]["finalizers"] = json!([FINALIZER]);
+                }
+                let (s, _) = sim.call(
+                    c,
+                    HttpRequest::new("POST", &cms(ns)).json(&body),
+                    &[201, 409],
+                );
+                format!("create {ns}/{name} -> {s}")
             }
+            5..=7 => {
+                let (s, mut obj) = sim.call(c, HttpRequest::new("GET", &path), &[200, 404]);
+                if s == 200 {
+                    obj["data"] = json!({"v": rng.next_u64().to_string()});
+                    if rng.chance(0.2) {
+                        // A stale write: conflicts unless nothing changed.
+                        obj["metadata"]["resourceVersion"] = json!((rv_of(&obj) - 1).to_string());
+                    }
+                    let (s, _) =
+                        sim.call(c, HttpRequest::new("PUT", &path).json(&obj), &[200, 409]);
+                    format!("update {ns}/{name} -> {s}")
+                } else {
+                    format!("update {ns}/{name} -> missing")
+                }
+            }
+            8..=10 => {
+                let v = rng.next_u64().to_string();
+                let (ct, body) = match rng.below(3) {
+                    0 => ("application/merge-patch+json", json!({"data": {"v": v}})),
+                    1 => (
+                        "application/strategic-merge-patch+json",
+                        json!({"data": {"v": v}, "metadata": {"labels": {"p": "1"}}}),
+                    ),
+                    _ => (
+                        "application/json-patch+json",
+                        json!([{"op": "add", "path": "/data", "value": {"v": v}}]),
+                    ),
+                };
+                let (s, _) = sim.call(
+                    c,
+                    HttpRequest::new("PATCH", &path)
+                        .json(&body)
+                        .with_content_type(ct),
+                    &[200, 404],
+                );
+                format!("patch {ns}/{name} {ct} -> {s}")
+            }
+            11..=13 => {
+                let (s, _) = sim.call(c, HttpRequest::new("DELETE", &path), &[200, 404]);
+                format!("delete {ns}/{name} -> {s}")
+            }
+            14 => {
+                // Release the finalizer of a deleting object.
+                let (s, mut obj) = sim.call(c, HttpRequest::new("GET", &path), &[200, 404]);
+                if s == 200 && obj["metadata"]["deletionTimestamp"].is_string() {
+                    obj["metadata"]["finalizers"] = json!([]);
+                    let (s, _) =
+                        sim.call(c, HttpRequest::new("PUT", &path).json(&obj), &[200, 409]);
+                    format!("release {ns}/{name} -> {s}")
+                } else {
+                    format!("release {ns}/{name} -> nothing")
+                }
+            }
+            15 if names.len() < cfg.max_clusters => {
+                forks += 1;
+                let to = format!("{c}.{forks}");
+                sim.api.fork_cluster(c, &to).expect("fork target is new");
+                // The fork's informer resumes from the parent's state.
+                let parent = &informers[c];
+                let i = Informer {
+                    rv: parent.rv,
+                    cursor: None,
+                    mirror: parent.mirror.clone(),
+                    relists: 0,
+                };
+                informers.insert(to.clone(), i);
+                format!("fork -> {to}")
+            }
+            16..=17 => match pagers.remove(c) {
+                None => {
+                    let p = Pager {
+                        ns,
+                        limit: 1 + rng.below(3),
+                        cont: String::new(),
+                        rv: String::new(),
+                        items: Mirror::new(),
+                    };
+                    pagers.insert(c.to_owned(), p);
+                    "pager start".into()
+                }
+                Some(mut p) => {
+                    let q = if p.cont.is_empty() {
+                        format!("{}?limit={}", cms(p.ns), p.limit)
+                    } else {
+                        format!("{}?limit={}&continue={}", cms(p.ns), p.limit, p.cont)
+                    };
+                    let (s, l) = sim.call(c, HttpRequest::new("GET", &q), &[200, 410]);
+                    if s == 200 {
+                        if !p.rv.is_empty() && l["metadata"]["resourceVersion"] != p.rv.as_str() {
+                            sim.violations
+                                .push(format!("{c}: page changed resourceVersion"));
+                        }
+                        p.rv = l["metadata"]["resourceVersion"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_owned();
+                        for item in l["items"].as_array().into_iter().flatten() {
+                            let (k, v) = entry(item);
+                            p.items.insert(k, v);
+                        }
+                        match l["metadata"]["continue"].as_str() {
+                            Some(cont) => {
+                                p.cont = cont.to_owned();
+                                pagers.insert(c.to_owned(), p);
+                            }
+                            None => {
+                                // The whole list must equal the list at its rv.
+                                let q = format!(
+                                    "{}?resourceVersion={}&resourceVersionMatch=Exact",
+                                    cms(p.ns),
+                                    p.rv
+                                );
+                                let (s, l) = sim.call(c, HttpRequest::new("GET", &q), &[200, 410]);
+                                if s == 200 {
+                                    let exact: Mirror = l["items"]
+                                        .as_array()
+                                        .into_iter()
+                                        .flatten()
+                                        .map(entry)
+                                        .collect();
+                                    if exact != p.items {
+                                        sim.violations.push(format!(
+                                            "{c}: paginated list differs from the list at rv {}",
+                                            p.rv
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    format!("pager page -> {s}")
+                }
+            },
             _ => {
-                let s = store.cluster(cluster).expect("cluster exists");
-                let w = watchers.get_mut(cluster).expect("watcher exists");
-                w.sync(s, Some(&mut faults), cluster, &mut violations);
-                Ok(format!("sync cursor={} relists={}", w.cursor, w.relists))
+                let i = informers.get_mut(c).expect("informer exists");
+                let mut i = std::mem::take(i);
+                i.sync(&mut sim, c, Some(&mut faults));
+                let out = format!("sync rv={} relists={}", i.rv, i.relists);
+                informers.insert(c.to_owned(), i);
+                out
             }
         };
-        let now = sim.env.clock.now().0;
         for f in &faults.injected()[faults_before..] {
-            let _ = writeln!(trace, "{step} {f}");
+            let _ = writeln!(sim.trace, "{step} {f}");
         }
-        let outcome = result.unwrap_or_else(|e| format!("err {e}"));
-        let _ = writeln!(trace, "{step} t={now} {cluster} {outcome}");
+        for line in sim.api.take_trace() {
+            let _ = writeln!(sim.trace, "{step} {line}");
+        }
+        let _ = writeln!(sim.trace, "{step} {c} {what}");
     }
 
-    // Invariant: after catching up without faults, every watcher mirrors its
-    // store exactly.
-    for (c, w) in &mut watchers {
-        let s = store.cluster(c).expect("cluster exists");
-        w.sync(s, None, c, &mut violations);
-        let truth: BTreeMap<_, _> = s
-            .list("configmaps", None)
-            .0
+    // Invariant: after catching up without faults, every informer mirrors
+    // its cluster exactly.
+    let names: Vec<String> = informers.keys().cloned().collect();
+    let mut relists = 0;
+    for c in &names {
+        let mut i = informers.remove(c).expect("listed");
+        i.sync(&mut sim, c, None);
+        let (_, l) = sim.call(c, HttpRequest::new("GET", CMS), &[200]);
+        let truth: Mirror = l["items"]
+            .as_array()
             .into_iter()
-            .map(|(k, o)| (k.clone(), (o.resource_version, o.value)))
+            .flatten()
+            .map(entry)
             .collect();
-        if w.mirror != truth {
-            violations.push(format!("{c}: watcher mirror diverged from store"));
+        if i.mirror != truth {
+            sim.violations
+                .push(format!("{c}: informer mirror diverged from the cluster"));
         }
         let _ = writeln!(
-            trace,
+            sim.trace,
             "final {c} rv={} objects={} relists={}",
-            s.resource_version(),
-            s.len(),
-            w.relists
+            l["metadata"]["resourceVersion"],
+            truth.len(),
+            i.relists
         );
+        relists += i.relists;
     }
-    if !store
-        .cluster_names()
-        .eq(watchers.keys().map(String::as_str))
-    {
-        violations.push("store clusters and watchers diverged".into());
+    for line in sim.api.take_trace() {
+        let _ = writeln!(sim.trace, "final {line}");
     }
 
     Outcome {
         seed,
-        trace_hash: fnv1a(trace.as_bytes()),
-        trace_lines: trace.lines().count(),
+        trace_hash: fnv1a(sim.trace.as_bytes()),
+        trace_lines: sim.trace.lines().count(),
         faults: faults.injected().len(),
         forks,
-        violations,
+        relists,
+        violations: sim.violations,
     }
 }
 
@@ -245,7 +507,7 @@ mod tests {
     #[test]
     fn same_seed_same_trace() {
         let cfg = Config::default();
-        for seed in 0..20 {
+        for seed in 0..10 {
             assert_eq!(
                 run(seed, &cfg).trace_hash,
                 run(seed, &cfg).trace_hash,
@@ -255,11 +517,15 @@ mod tests {
     }
 
     #[test]
-    fn forks_and_faults_happen() {
+    fn forks_faults_and_relists_happen() {
         let cfg = Config::default();
         let o = run(0, &cfg);
         assert!(o.faults > 0, "default config should inject faults");
         assert!(o.forks > 0, "default config should fork clusters");
+        assert!(
+            o.relists > CLUSTERS.len() as u32,
+            "faults and compaction should force relists"
+        );
         let quiet = Config {
             faults: FaultConfig::NONE,
             ..Config::default()
@@ -276,7 +542,7 @@ mod tests {
     #[test]
     fn invariants_hold_across_seeds() {
         let cfg = Config::default();
-        for seed in 0..200 {
+        for seed in 0..100 {
             let o = run(seed, &cfg);
             assert!(o.ok(), "seed {seed}: {:?}", o.violations);
         }

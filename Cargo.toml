@@ -13,6 +13,7 @@ publish = false
 
 [workspace.dependencies]
 # Add internal crates here as they gain a dependent.
+kubemu-api = { path = "crates/kubemu-api" }
 kubemu-api-types = { path = "crates/kubemu-api-types" }
 kubemu-env = { path = "crates/kubemu-env" }
 kubemu-env-sim = { path = "crates/kubemu-env-sim" }

@@ -2,7 +2,7 @@
 
 > **kubemu** (pronounced *kube emu*) is a single Rust binary that emulates enough of Kubernetes to deploy and test real workloads (app, database, ingress, operators) across multiple clusters, in CI or locally. It uses a fraction of the resources of kind/k3s, and seeded fault injection is a first-class feature.
 
-> **Status: M1 in progress (§12.1 steps 1–3 done).** Done: M0, plus vendored upstream OpenAPI (v1.37.3) with the generated T0 resource table and schema arena (`kubemu-api-types`); JSON patch and strategic merge patch ported from the apiserver's Go code and differentially fuzzed (merge, JSON patch, SMP) against the Go oracle; and the synchronous `kubemu-api` frontend (discovery, OpenAPI, CRUD/patch/watch with resourceVersion semantics, selectors, pagination, `/status`, finalizers, namespace lifecycle). **Next agent: continue at §12.1 step 4, DST through the frontend.** See §14 for ADR status.
+> **Status: M1 in progress (§12.1 steps 1–4 done).** Done: M0, plus vendored upstream OpenAPI (v1.37.3) with the generated T0 resource table and schema arena (`kubemu-api-types`); JSON patch and strategic merge patch ported from the apiserver's Go code and differentially fuzzed (merge, JSON patch, SMP) against the Go oracle; and the synchronous `kubemu-api` frontend (discovery, OpenAPI, CRUD/patch/watch with resourceVersion semantics, selectors, pagination, `/status`, finalizers, namespace lifecycle), with the DST harness driving it through HTTP-shaped requests. **Next agent: continue at §12.1 step 5, controllers; add the "GC eventually consistent" DST invariant with the garbage collector.** See §14 for ADR status.
 
 **Developing**
 ```sh

@@ -59,8 +59,8 @@ fn main() -> ExitCode {
         }
         if count == 1 {
             println!(
-                "seed={seed} trace={:016x} lines={} faults={} forks={}",
-                o.trace_hash, o.trace_lines, o.faults, o.forks
+                "seed={seed} trace={:016x} lines={} faults={} forks={} relists={}",
+                o.trace_hash, o.trace_lines, o.faults, o.forks, o.relists
             );
         }
     }

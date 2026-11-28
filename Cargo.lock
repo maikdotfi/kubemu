@@ -208,10 +208,11 @@ version = "0.0.0"
 name = "kubemu-sim"
 version = "0.0.0"
 dependencies = [
+ "kubemu-api",
  "kubemu-env",
  "kubemu-env-sim",
  "kubemu-faults",
- "kubemu-store",
+ "serde_json",
 ]
 
 [[package]]
