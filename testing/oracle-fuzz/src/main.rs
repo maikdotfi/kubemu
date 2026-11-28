@@ -5,12 +5,22 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: kubemu-oracle-fuzz --oracle PATH [--seed S] [--cases N]";
+const USAGE: &str =
+    "usage: kubemu-oracle-fuzz --oracle PATH [--op merge|jsonpatch|smp] [--seed S] [--cases N]";
+
+type Case = fn(&mut kubemu_oracle_fuzz::Oracle, u64) -> kubemu_oracle_fuzz::CaseResult;
+
+const OPS: &[(&str, Case)] = &[
+    ("merge", kubemu_oracle_fuzz::merge_case),
+    ("jsonpatch", kubemu_oracle_fuzz::jsonpatch_case),
+    ("smp", kubemu_oracle_fuzz::smp_case),
+];
 
 fn main() -> ExitCode {
     let mut oracle = None;
     let mut start = 0u64;
     let mut cases = 10_000u64;
+    let mut only: Option<String> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -23,6 +33,7 @@ fn main() -> ExitCode {
             "--seed" => start = num("--seed"),
             "--cases" => cases = num("--cases"),
             "--oracle" => oracle = args.next().map(PathBuf::from),
+            "--op" => only = args.next(),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return ExitCode::SUCCESS;
@@ -46,30 +57,45 @@ fn main() -> ExitCode {
         }
     };
 
-    let mut failed = 0u64;
-    for seed in start..start + cases {
-        match kubemu_oracle_fuzz::merge_case(&mut o, seed) {
-            Ok(Ok(())) => {}
-            Ok(Err(diff)) => {
-                failed += 1;
-                eprintln!(
-                    "FAIL seed={seed}: {diff}\n  replay: kubemu-oracle-fuzz --oracle {} --seed {seed} --cases 1",
-                    oracle.display()
-                );
-            }
-            Err(e) => {
-                eprintln!("oracle transport error at seed={seed}: {e}");
-                return ExitCode::FAILURE;
+    if let Some(op) = &only
+        && !OPS.iter().any(|(name, _)| name == op)
+    {
+        eprintln!("unknown op {op:?}\n{USAGE}");
+        return ExitCode::from(2);
+    }
+
+    let mut any_failed = false;
+    for (name, case) in OPS {
+        if only.as_ref().is_some_and(|o| o != name) {
+            continue;
+        }
+        let (mut failed, mut applied) = (0u64, 0u64);
+        for seed in start..start + cases {
+            match case(&mut o, seed) {
+                Ok(Ok(ok)) => applied += u64::from(ok),
+                Ok(Err(diff)) => {
+                    failed += 1;
+                    eprintln!(
+                        "FAIL {name} seed={seed}: {diff}\n  replay: mise run fuzz -- --op {name} --seed {seed} --cases 1"
+                    );
+                }
+                Err(e) => {
+                    eprintln!("oracle transport error at {name} seed={seed}: {e}");
+                    return ExitCode::FAILURE;
+                }
             }
         }
+        // "applied": both sides accepted the patch (the rest were rejected
+        // by both); a fuzz that only agrees on errors proves little.
+        println!(
+            "{name}: {cases} cases from {start}: {} passed ({applied} applied), {failed} failed",
+            cases - failed
+        );
+        any_failed |= failed > 0;
     }
-    println!(
-        "merge: {cases} cases from {start}: {} passed, {failed} failed",
-        cases - failed
-    );
-    if failed == 0 {
-        ExitCode::SUCCESS
-    } else {
+    if any_failed {
         ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
     }
 }

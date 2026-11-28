@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -93,5 +94,17 @@ func TestSMPUnknownKind(t *testing.T) {
 	got := call(t, "smp", patchPayload{APIVersion: "v1", Kind: "Nope", Original: json.RawMessage(`{}`), Patch: json.RawMessage(`{}`)})
 	if got.Error == "" {
 		t.Fatal("expected an error for an unknown kind")
+	}
+}
+
+func TestPanicBecomesError(t *testing.T) {
+	// Adding into a nil map (a JSON null document) panics in json-patch;
+	// the apiserver recovers that into a 500.
+	got := call(t, "jsonpatch", patchPayload{
+		Original: json.RawMessage(`null`),
+		Patch:    json.RawMessage(`[{"op":"add","path":"/a","value":1}]`),
+	})
+	if !strings.HasPrefix(got.Error, "panic: ") {
+		t.Fatalf("got %+v", got)
 	}
 }

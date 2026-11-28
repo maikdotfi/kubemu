@@ -2,14 +2,14 @@
 
 > **kubemu** (pronounced *kube emu*) is a single Rust binary that emulates enough of Kubernetes to deploy and test real workloads (app, database, ingress, operators) across multiple clusters, in CI or locally. It uses a fraction of the resources of kind/k3s, and seeded fault injection is a first-class feature.
 
-> **Status: M0 done, M1 ready to start.** In place: `Env` traits (clock + RNG), the determinism lints, an `imbl`-backed store with watch and O(1) cluster fork, a seeded fault schedule for the store fault points, a DST harness (forks, watch faults, 1000 seeds, determinism check) and a Go oracle (merge, JSON patch and SMP via the apiserver's own code) with the first differential fuzz green on merge patch. Everything else is a placeholder crate. All M1 ADRs (0010 to 0013) are accepted. **Next agent: start at §12.1, the M1 work plan.** See §14 for ADR status.
+> **Status: M1 in progress (§12.1 steps 1–2 done).** Done: M0, plus vendored upstream OpenAPI (v1.37.3) with the generated T0 resource table and schema arena (`kubemu-api-types`), and JSON patch and strategic merge patch ported from the apiserver's Go code, differentially fuzzed (merge, JSON patch, SMP) against the Go oracle. **Next agent: continue at §12.1 step 3, the `kubemu-api` frontend.** See §14 for ADR status.
 
 **Developing**
 ```sh
 mise install            # Go (oracle), kubectl, helm, kind. Rust comes from rust-toolchain.toml via rustup.
 mise run ci             # fmt, clippy (incl. determinism lints), tests, k8s pins, Go oracle, differential fuzz, 1000-seed DST sweep
 mise run sim -- --seed 42                 # replay a single seed
-mise run fuzz -- --seed 7 --cases 1       # replay a single differential-fuzz case
+mise run fuzz -- --op smp --seed 7 --cases 1   # replay one differential-fuzz case (merge|jsonpatch|smp)
 cargo run -p kubemu-cli -- help           # the kubemu binary
 ```
 Design decisions go in [`docs/adr/`](docs/adr/).

@@ -22,6 +22,7 @@ import (
 	"os"
 
 	jsonpatch "gopkg.in/evanphx/json-patch.v4"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -47,7 +48,14 @@ type patchPayload struct {
 	Patch      json.RawMessage `json:"patch"`
 }
 
-func handle(req Request) Response {
+// handle answers one request. A panic in the Kubernetes code becomes an
+// error, as the apiserver's panic recovery turns it into a 500.
+func handle(req Request) (resp Response) {
+	defer func() {
+		if r := recover(); r != nil {
+			resp = Response{Error: fmt.Sprintf("panic: %v", r)}
+		}
+	}()
 	switch req.Op {
 	case "ping":
 		return Response{Result: json.RawMessage(`"pong"`)}
@@ -86,6 +94,10 @@ func withPayload(req Request, f func(patchPayload) ([]byte, error)) Response {
 // decodes them (case-sensitive, ints preserved), then patched as maps. The
 // result is not round-tripped through the typed object; that is decoding,
 // a separate concern from patch semantics.
+//
+// The apiserver builds the original with ToUnstructured, whose slices have
+// no spare capacity. SMP appends to and edits original slices in place, so
+// capacity changes results; DeepCopyJSONValue gives the same exact sizes.
 func smp(p patchPayload) ([]byte, error) {
 	gv, err := schema.ParseGroupVersion(p.APIVersion)
 	if err != nil {
@@ -95,10 +107,11 @@ func smp(p patchPayload) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	original := map[string]any{}
-	if err := kjson.UnmarshalCaseSensitivePreserveInts(p.Original, &original); err != nil {
+	decoded := map[string]any{}
+	if err := kjson.UnmarshalCaseSensitivePreserveInts(p.Original, &decoded); err != nil {
 		return nil, err
 	}
+	original := runtime.DeepCopyJSONValue(decoded).(map[string]any)
 	patch := map[string]any{}
 	if err := kjson.UnmarshalCaseSensitivePreserveInts(p.Patch, &patch); err != nil {
 		return nil, err
