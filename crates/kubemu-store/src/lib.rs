@@ -72,6 +72,9 @@ pub struct Event<V> {
     pub resource_version: ResourceVersion,
     /// For `Deleted`, the last state of the object.
     pub value: V,
+    /// For `Modified`, the state before the write. Watch filters need it to
+    /// see an object leave a selector, and point-in-time lists to roll back.
+    pub prev: Option<V>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -191,7 +194,7 @@ impl<V: Clone> ClusterStore<V> {
                 value: value.clone(),
             },
         );
-        self.record(EventKind::Added, key, rv, value);
+        self.record(EventKind::Added, key, rv, value, None);
         Ok(rv)
     }
 
@@ -205,14 +208,17 @@ impl<V: Clone> ClusterStore<V> {
     ) -> Result<ResourceVersion> {
         self.check(key, expected)?;
         let rv = self.bump();
-        self.objects.insert(
-            key.clone(),
-            Object {
-                resource_version: rv,
-                value: value.clone(),
-            },
-        );
-        self.record(EventKind::Modified, key.clone(), rv, value);
+        let prev = self
+            .objects
+            .insert(
+                key.clone(),
+                Object {
+                    resource_version: rv,
+                    value: value.clone(),
+                },
+            )
+            .map(|o| o.value);
+        self.record(EventKind::Modified, key.clone(), rv, value, prev);
         Ok(rv)
     }
 
@@ -224,7 +230,7 @@ impl<V: Clone> ClusterStore<V> {
         self.check(key, expected)?;
         let old = self.objects.remove(key).expect("checked above");
         let rv = self.bump();
-        self.record(EventKind::Deleted, key.clone(), rv, old.value.clone());
+        self.record(EventKind::Deleted, key.clone(), rv, old.value.clone(), None);
         Ok(old)
     }
 
@@ -275,6 +281,7 @@ impl<V: Clone> ClusterStore<V> {
         key: ObjectKey,
         resource_version: ResourceVersion,
         value: V,
+        prev: Option<V>,
     ) {
         if self.log.len() == self.log_capacity {
             self.log.pop_front();
@@ -284,6 +291,7 @@ impl<V: Clone> ClusterStore<V> {
             key,
             resource_version,
             value,
+            prev,
         });
     }
 }

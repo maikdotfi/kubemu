@@ -1,0 +1,21 @@
+[package]
+name = "kubemu-api"
+description = "Synchronous API frontend: request pipeline, discovery, admission, watch cursors (ADR 0011)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+kubemu-api-types.workspace = true
+kubemu-env.workspace = true
+kubemu-patch.workspace = true
+kubemu-store.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+kubemu-env-sim.workspace = true
