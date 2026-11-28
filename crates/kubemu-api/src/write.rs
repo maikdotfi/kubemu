@@ -2,6 +2,8 @@
 //! deletecollection, with built-in admission (namespace lifecycle,
 //! service accounts), preconditions, finalizers and graceful deletion.
 
+use std::collections::BTreeSet;
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use kubemu_api_types::ResourceInfo;
@@ -13,6 +15,7 @@ use crate::http::{HttpRequest, HttpResponse, body_type};
 use crate::meta;
 use crate::object::{self as o, key, meta_mut};
 use crate::read::Filter;
+use crate::services;
 use crate::status::{self, ApiError, ApiResult, Cause};
 use crate::strategy;
 use crate::{Api, Ctx};
@@ -145,14 +148,38 @@ impl Api {
         }
     }
 
-    /// Metadata and per-kind validation (ADR 0013).
-    fn validate(&self, r: &ResourceInfo, obj: &Value) -> ApiResult<()> {
-        let causes = kubemu_validation::validate(r, obj);
+    /// Metadata and per-kind validation (ADR 0013); `old` for updates.
+    fn validate(&self, r: &ResourceInfo, obj: &Value, old: Option<&Value>) -> ApiResult<()> {
+        let causes = match old {
+            None => kubemu_validation::validate(r, obj),
+            Some(old) => kubemu_validation::validate_update(r, obj, old),
+        };
         if causes.is_empty() {
             Ok(())
         } else {
             Err(ApiError::invalid(r.kind, r.group, o::name(obj), causes))
         }
+    }
+
+    /// The cluster's CIDRs and the cluster IPs its Services hold, but for
+    /// the Service named `except` in the request's namespace.
+    fn service_ips(
+        &self,
+        ctx: &Ctx<'_>,
+        except: Option<&str>,
+    ) -> ApiResult<(kubemu_net::ClusterNetwork, BTreeSet<Ipv4Addr>)> {
+        let net = *self
+            .networks
+            .get(ctx.cluster)
+            .ok_or_else(|| ApiError::not_found_path(format!("cluster {}", ctx.cluster)))?;
+        let (items, _) = self
+            .cluster(ctx.cluster)?
+            .list(&o::storage_resource(ctx.r), None);
+        let used = services::used_ips(
+            items.iter().map(|(_, v)| v.value.as_ref()),
+            except.map(|n| (ctx.ns(), n)),
+        );
+        Ok((net, used))
     }
 
     fn store_err(&self, ctx: &Ctx<'_>, name: &str, e: StoreError) -> ApiError {
@@ -319,8 +346,13 @@ impl Api {
         );
         let name = o::name(&obj).to_owned();
         self.admit_namespace(ctx, &name)?;
+        if is_service(r) {
+            let (net, used) = self.service_ips(ctx, None)?;
+            let rng = self.env.rng.clone();
+            services::begin_create(&mut obj, &net, &used, ctx.dry_run()?, rng.as_ref())?;
+        }
         strategy::prepare_for_create(r, &mut obj);
-        self.validate(r, &obj)?;
+        self.validate(r, &obj, None)?;
         strategy::canonicalize(r, &mut obj);
         if ctx.dry_run()? {
             return Ok(with_warnings(HttpResponse::json(201, obj), warnings));
@@ -407,6 +439,11 @@ impl Api {
             }
             m.insert("resourceVersion".into(), json!(old_rv));
         }
+        if is_service(r) && sub.is_none() {
+            let (net, used) = self.service_ips(ctx, Some(&url_name))?;
+            let rng = self.env.rng.clone();
+            services::begin_update(&mut obj, &old, &net, &used, ctx.dry_run()?, rng.as_ref())?;
+        }
         strategy::prepare_for_update(r, &mut obj, &old, sub);
         if o::is_deleting(&old) {
             let had = o::finalizers(&old);
@@ -423,7 +460,7 @@ impl Api {
                 ));
             }
         }
-        self.validate(r, &obj)?;
+        self.validate(r, &obj, Some(&old))?;
         strategy::canonicalize(r, &mut obj);
         if obj == *old {
             return Ok(with_warnings(HttpResponse::json(200, obj), warnings));
@@ -677,6 +714,10 @@ fn review(mut obj: Value) -> Value {
         })
     };
     obj
+}
+
+fn is_service(r: &ResourceInfo) -> bool {
+    r.group.is_empty() && r.plural == "services"
 }
 
 fn with_warnings(mut r: HttpResponse, w: Vec<String>) -> HttpResponse {

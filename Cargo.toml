@@ -21,6 +21,7 @@ kubemu-env-sim = { path = "crates/kubemu-env-sim" }
 kubemu-env-real = { path = "crates/kubemu-env-real" }
 kubemu-apiserver = { path = "crates/kubemu-apiserver" }
 kubemu-faults = { path = "crates/kubemu-faults" }
+kubemu-net = { path = "crates/kubemu-net" }
 kubemu-patch = { path = "crates/kubemu-patch" }
 kubemu-proto = { path = "crates/kubemu-proto" }
 kubemu-scheduler = { path = "crates/kubemu-scheduler" }

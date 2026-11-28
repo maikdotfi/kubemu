@@ -584,6 +584,41 @@ fn service(g: &mut Gen) -> Value {
             json!(*g.pick(&["ClientIP", "Sticky", "None"])),
         );
     }
+    // Cluster IPs and families, unnormalized: validation sees them as sent.
+    const IPS: [&str; 8] = [
+        "10.0.0.1",
+        "None",
+        "",
+        "fd00::1",
+        "010.0.0.1",
+        "::ffff:10.0.0.1",
+        "10.0.0.256",
+        "10.0.0.2",
+    ];
+    if g.chance(1, 3) {
+        spec.insert("clusterIP".into(), json!(*g.pick(&IPS)));
+    }
+    if g.chance(1, 3) {
+        let n = g.below(4);
+        let ips: Vec<&str> = (0..n).map(|_| *g.pick(&IPS)).collect();
+        spec.insert("clusterIPs".into(), json!(ips));
+    }
+    if g.chance(1, 4) {
+        let n = g.below(3);
+        let fams: Vec<&str> = (0..n).map(|_| *g.pick(&["IPv4", "IPv6", "IPv5"])).collect();
+        spec.insert("ipFamilies".into(), json!(fams));
+    }
+    if g.chance(1, 4) {
+        spec.insert(
+            "ipFamilyPolicy".into(),
+            json!(*g.pick(&[
+                "SingleStack",
+                "PreferDualStack",
+                "RequireDualStack",
+                "Bogus"
+            ])),
+        );
+    }
     json!({
         "apiVersion": "v1", "kind": "Service",
         "metadata": {"name": *mostly(g, &["svc", "1svc", "Svc", "a.b"]), "namespace": "default"},

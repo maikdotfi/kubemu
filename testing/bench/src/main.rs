@@ -199,11 +199,12 @@ fn wait_ready(stderr: Option<&mut BufReader<ChildStderr>>) -> Result<SocketAddr,
 /// ConfigMaps.
 fn fork_times(objects: usize) -> Vec<Duration> {
     let (env, _) = kubemu_env_real::real_env(Some(1));
-    let mut controllers = kubemu_controllers::standard(&env, "bench");
-    controllers.push(Box::new(kubemu_scheduler::Scheduler::new(env.clone())));
-    let mut manager = kubemu_controllers::Manager::new(controllers);
     let mut api = Api::new(env.clone());
     api.add_cluster("bench");
+    let pod_cidr = api.network("bench").expect("added").pod_cidr;
+    let mut controllers = kubemu_controllers::standard(&env, "bench", pod_cidr);
+    controllers.push(Box::new(kubemu_scheduler::Scheduler::new(env.clone())));
+    let mut manager = kubemu_controllers::Manager::new(controllers);
     manager.settle(&mut api, "bench", 100);
     for i in 0..objects {
         let body = json!({"apiVersion": "v1", "kind": "ConfigMap",

@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 kubemu-api-types.workspace = true
 kubemu-env.workspace = true
+kubemu-net.workspace = true
 kubemu-patch.workspace = true
 kubemu-proto.workspace = true
 kubemu-store.workspace = true

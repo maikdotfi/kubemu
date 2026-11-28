@@ -13,7 +13,7 @@
 //	smp        strategic merge patch   strategicpatch.StrategicMergeMapPatch
 //
 // quantity, default, validate, strategy and proto are in validate.go.
-// openapi-v2-pb is in openapiv2.go. `oracle-go wiretable` prints
+// service is in service.go. openapi-v2-pb is in openapiv2.go. `oracle-go wiretable` prints
 // kubemu-proto's wire table (wiretable.go). Planned: ssa
 // (structured-merge-diff).
 package main
@@ -84,6 +84,8 @@ func handle(req Request) (resp Response) {
 		return raw(req, validate)
 	case "strategy":
 		return raw(req, strategyInfo)
+	case "service":
+		return raw(req, serviceOp)
 	case "proto":
 		return raw(req, protoRoundTrip)
 	case "openapi-v2-pb":

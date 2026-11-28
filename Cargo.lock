@@ -281,6 +281,7 @@ dependencies = [
  "kubemu-api-types",
  "kubemu-env",
  "kubemu-env-sim",
+ "kubemu-net",
  "kubemu-patch",
  "kubemu-proto",
  "kubemu-store",
@@ -341,6 +342,7 @@ dependencies = [
  "kubemu-api-types",
  "kubemu-env",
  "kubemu-env-sim",
+ "kubemu-net",
  "kubemu-store",
  "serde_json",
 ]
@@ -386,6 +388,9 @@ version = "0.0.0"
 [[package]]
 name = "kubemu-net"
 version = "0.0.0"
+dependencies = [
+ "kubemu-env",
+]
 
 [[package]]
 name = "kubemu-oracle-fuzz"

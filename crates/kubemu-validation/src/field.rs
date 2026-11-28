@@ -55,6 +55,16 @@ pub fn invalid(field: &str, value: &str, detail: &str) -> Cause {
     )
 }
 
+/// `field.Invalid` with a value Go prints as JSON: lists, pointers and
+/// named string types (`null` for nil).
+pub fn invalid_json(field: &str, value: &serde_json::Value, detail: &str) -> Cause {
+    cause(
+        "FieldValueInvalid",
+        field,
+        with_detail(format!("Invalid value: {value}"), detail),
+    )
+}
+
 /// `field.Invalid` with a number (printed bare).
 pub fn invalid_num(field: &str, value: impl Display, detail: &str) -> Cause {
     cause(

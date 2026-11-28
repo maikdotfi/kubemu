@@ -32,7 +32,7 @@ fn usage() {
     }
 }
 
-const UP_USAGE: &str = "usage: kubemu up [--cluster NAME] [--host HOST] [--port PORT] [--kubeconfig FILE] [--seed N] [--watch-log EVENTS]";
+const UP_USAGE: &str = "usage: kubemu up [--cluster NAME] [--host HOST] [--port PORT] [--kubeconfig FILE] [--seed N] [--watch-log EVENTS] [--pod-cidr CIDR] [--service-cidr CIDR]\n  CIDRs default to 10.64.0.0/16 (pods) and 10.128.0.0/16 (Services); give clusters run side by side their own.";
 const KUBECONFIG_USAGE: &str =
     "usage: kubemu kubeconfig [--cluster NAME] [--host HOST] [--port PORT]";
 
@@ -46,6 +46,8 @@ struct Opts {
     seed: Option<u64>,
     /// Events kept for resuming watches; older resourceVersions get 410.
     watch_log: usize,
+    pod_cidr: Option<kubemu_api::Cidr>,
+    service_cidr: Option<kubemu_api::Cidr>,
 }
 
 fn parse_opts(args: &[String], allow_up: bool) -> Result<Opts, String> {
@@ -56,6 +58,8 @@ fn parse_opts(args: &[String], allow_up: bool) -> Result<Opts, String> {
         kubeconfig: None,
         seed: None,
         watch_log: kubemu_api::LOG_CAPACITY,
+        pod_cidr: None,
+        service_cidr: None,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -83,20 +87,38 @@ fn parse_opts(args: &[String], allow_up: bool) -> Result<Opts, String> {
                     .filter(|&n| n > 0)
                     .ok_or("--watch-log needs a positive number")?
             }
+            "--pod-cidr" if allow_up => o.pod_cidr = Some(val()?.parse()?),
+            "--service-cidr" if allow_up => o.service_cidr = Some(val()?.parse()?),
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
     Ok(o)
 }
 
+/// The cluster's CIDRs: the flags, else the first cluster's defaults.
+fn network(o: &Opts) -> Result<kubemu_api::ClusterNetwork, String> {
+    let d = kubemu_api::ClusterNetwork::default_for(0).expect("one cluster has defaults");
+    kubemu_api::ClusterNetwork::new(
+        o.pod_cidr.unwrap_or(d.pod_cidr),
+        o.service_cidr.unwrap_or(d.service_cidr),
+    )
+}
+
 /// `kubemu up`: one cluster, served until Ctrl-C.
 fn up(o: Opts) -> ExitCode {
+    let net = match network(&o) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("kubemu up: {e}\n{UP_USAGE}");
+            return ExitCode::from(2);
+        }
+    };
     let (env, seed) = kubemu_env_real::real_env(o.seed);
-    let mut controllers = kubemu_controllers::standard(&env, &o.cluster);
+    let mut controllers = kubemu_controllers::standard(&env, &o.cluster, net.pod_cidr);
     controllers.push(Box::new(kubemu_scheduler::Scheduler::new(env.clone())));
     let mut manager = kubemu_controllers::Manager::new(controllers);
     let mut api = kubemu_api::Api::with_log_capacity(env, o.watch_log);
-    api.add_cluster(&o.cluster);
+    api.add_cluster_with(&o.cluster, net);
     // Ready before serving: the node and default ServiceAccounts exist by
     // the first request (the empty-cluster-ready budget, README §4.4).
     manager.settle(&mut api, &o.cluster, 100);
@@ -120,8 +142,8 @@ fn up(o: Opts) -> ExitCode {
     }
     // Principle 1.6: say loudly what is emulated or missing.
     eprintln!(
-        "kubemu: cluster {:?} ready, serving on {url} (seed {seed})",
-        o.cluster
+        "kubemu: cluster {:?} ready, serving on {url} (seed {seed}; pods {}, services {})",
+        o.cluster, net.pod_cidr, net.service_cidr
     );
     eprintln!(
         "kubemu: WARNING: plain HTTP and no authentication; every client is cluster-admin (ADR 0011)"

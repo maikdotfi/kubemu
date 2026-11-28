@@ -14,15 +14,17 @@
 //!   pages;
 //! - clusters are forked mid-run, and informers follow onto the fork;
 //! - owners and dependents are created and deleted with every propagation
-//!   policy; pods and a Service come and go; the `team` namespace is
-//!   deleted and recreated;
+//!   policy; pods and Services come and go (Services with allocated,
+//!   requested or no cluster IPs, in CIDRs small enough to run out); the
+//!   `team` namespace is deleted and recreated;
 //! - the built-in controllers (`kubemu-controllers`, `kubemu-scheduler`)
 //!   are actors too, stepped one at a time between client requests.
 //!
 //! Invariants: no unexpected response codes, watch resourceVersions
 //! strictly increase, no lost events (every informer mirrors the cluster
-//! once caught up), and a paginated list equals the list at its
-//! resourceVersion. Once clients stop and controllers settle (virtual time
+//! once caught up), a paginated list equals the list at its
+//! resourceVersion, and no two live objects share an IP (Service cluster
+//! IPs and pod IPs, each inside its CIDR). Once clients stop and controllers settle (virtual time
 //! advancing to their requeues): nothing is left terminating, no
 //! dependent outlives all its owners (GC eventually consistent), every
 //! namespace has its default ServiceAccount, every pod is bound and
@@ -33,7 +35,7 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use kubemu_api::object;
-use kubemu_api::{Api, HttpRequest, Reply, WatchCursor};
+use kubemu_api::{Api, Cidr, ClusterNetwork, HttpRequest, Reply, WatchCursor};
 use kubemu_controllers::{Manager, stored};
 use kubemu_env::Rng;
 use kubemu_env_sim::SimEnv;
@@ -48,11 +50,27 @@ const FINALIZER: &str = "sim.kubemu.dev/hold";
 /// terminating (403) or gone (404).
 const CREATE_OK: &[u16] = &[201, 403, 404, 409];
 
+/// Service names; more than a cluster's Service CIDR holds.
+const SERVICES: [&str; 6] = ["web", "db", "api", "cache", "queue", "search"];
+
+/// Cluster `i`'s CIDRs: room for every pod the sim makes (4 names in 2
+/// namespaces), and for fewer Services than it makes, so allocation runs
+/// out and freed IPs are reused.
+fn network(i: u8) -> ClusterNetwork {
+    let c = |s: String| s.parse::<Cidr>().expect("valid CIDR");
+    ClusterNetwork::new(
+        c(format!("10.{}.0.0/28", 64 + i)),
+        c(format!("10.{}.0.0/29", 128 + i)),
+    )
+    .expect("disjoint")
+}
+
 /// The controllers of `kubemu up`, for one cluster. A fork is a copy of
 /// its root cluster, nodes included, so its kubelet is the root's node.
-fn controllers(sim: &SimEnv, cluster: &str) -> Manager {
+fn controllers(sim: &SimEnv, api: &Api, cluster: &str) -> Manager {
     let root = cluster.split('.').next().unwrap_or(cluster);
-    let mut cs = kubemu_controllers::standard(&sim.env, root);
+    let pod_cidr = api.network(cluster).expect("cluster exists").pod_cidr;
+    let mut cs = kubemu_controllers::standard(&sim.env, root, pod_cidr);
     cs.push(Box::new(kubemu_scheduler::Scheduler::new(sim.env.clone())));
     Manager::new(cs)
 }
@@ -286,9 +304,9 @@ pub fn run(seed: u64, cfg: &Config) -> Outcome {
     let mut informers: BTreeMap<String, Informer> = BTreeMap::new();
     let mut pagers: BTreeMap<String, Pager> = BTreeMap::new();
     let mut managers: BTreeMap<String, Manager> = BTreeMap::new();
-    for c in CLUSTERS {
-        sim.api.add_cluster(c);
-        managers.insert(c.to_owned(), controllers(&simenv, c));
+    for (i, c) in CLUSTERS.into_iter().enumerate() {
+        sim.api.add_cluster_with(c, network(i as u8));
+        managers.insert(c.to_owned(), controllers(&simenv, &sim.api, c));
         sim.call(
             c,
             HttpRequest::new("POST", "/api/v1/namespaces")
@@ -388,7 +406,7 @@ pub fn run(seed: u64, cfg: &Config) -> Outcome {
                     relists: 0,
                 };
                 informers.insert(to.clone(), i);
-                managers.insert(to.clone(), controllers(&simenv, &to));
+                managers.insert(to.clone(), controllers(&simenv, &sim.api, &to));
                 format!("fork -> {to}")
             }
             16..=17 => match pagers.remove(c) {
@@ -498,12 +516,64 @@ pub fn run(seed: u64, cfg: &Config) -> Outcome {
                     format!("delete pod {ns}/{pod} -> {s}")
                 }
             }
-            28 => {
+            18..=20 | 28 => {
+                let svc = sim.pick(&SERVICES);
                 let p = format!("/api/v1/namespaces/{ns}/services");
-                let body = json!({"metadata": {"name": "web"}, "spec": {"selector": {"app": "web"},
-                    "ports": [{"port": 80, "targetPort": "http", "protocol": "TCP"}]}});
-                let (s, _) = sim.call(c, HttpRequest::new("POST", &p).json(&body), CREATE_OK);
-                format!("create service {ns}/web -> {s}")
+                let one = format!("{p}/{svc}");
+                let cidr = sim.api.network(c).expect("cluster exists").service_cidr;
+                match rng.below(6) {
+                    0..=3 => {
+                        let app = sim.pick(&["web", "db"]);
+                        let mut spec = json!({"selector": {"app": app},
+                            "ports": [{"port": 80, "targetPort": "http", "protocol": "TCP"}]});
+                        // Requested IPs may be taken (422); allocation may
+                        // find the CIDR full (500).
+                        let ok: &[u16] = match rng.below(4) {
+                            0 => {
+                                let host = rng.below(6) as u32;
+                                let ip =
+                                    std::net::Ipv4Addr::from(u32::from(cidr.first_host()) + host);
+                                spec["clusterIP"] = json!(ip.to_string());
+                                &[201, 403, 404, 409, 422]
+                            }
+                            1 => {
+                                spec["clusterIP"] = json!("None");
+                                CREATE_OK
+                            }
+                            _ => &[201, 403, 404, 409, 500],
+                        };
+                        let body = json!({"metadata": {"name": svc}, "spec": spec});
+                        let (s, _) = sim.call(c, HttpRequest::new("POST", &p).json(&body), ok);
+                        format!("create service {ns}/{svc} -> {s}")
+                    }
+                    4 => {
+                        // An update that leaves the cluster IPs out keeps them.
+                        let (s, mut obj) = sim.call(c, HttpRequest::new("GET", &one), &[200, 404]);
+                        if s == 200 {
+                            let before = obj["spec"]["clusterIPs"].clone();
+                            if let Some(spec) = obj["spec"].as_object_mut() {
+                                spec.remove("clusterIP");
+                                spec.remove("clusterIPs");
+                            }
+                            obj["metadata"]["labels"] = json!({"v": rng.below(9).to_string()});
+                            let (s, after) =
+                                sim.call(c, HttpRequest::new("PUT", &one).json(&obj), &[200, 409]);
+                            if s == 200 && after["spec"]["clusterIPs"] != before {
+                                sim.violations.push(format!(
+                                    "step {step}: {c} update of {ns}/{svc} moved its IPs from {before} to {}",
+                                    after["spec"]["clusterIPs"]
+                                ));
+                            }
+                            format!("update service {ns}/{svc} -> {s}")
+                        } else {
+                            format!("update service {ns}/{svc} -> missing")
+                        }
+                    }
+                    _ => {
+                        let (s, _) = sim.call(c, HttpRequest::new("DELETE", &one), &[200, 404]);
+                        format!("delete service {ns}/{svc} -> {s}")
+                    }
+                }
             }
             29 => {
                 if rng.chance(0.3) {
@@ -538,6 +608,7 @@ pub fn run(seed: u64, cfg: &Config) -> Outcome {
                 out
             }
         };
+        check_ips(&mut sim, c);
         for f in &faults.injected()[faults_before..] {
             let _ = writeln!(sim.trace, "{step} {f}");
         }
@@ -627,6 +698,56 @@ fn release_holds(sim: &mut Sim<'_>, c: &str) {
     }
 }
 
+/// No two live objects of cluster `c` share an IP, and each is in its
+/// CIDR. Reads the store directly, so the check leaves no trace.
+fn check_ips(sim: &mut Sim<'_>, c: &str) {
+    let Some(net) = sim.api.network(c).copied() else {
+        return;
+    };
+    let Ok(cs) = sim.api.store().cluster(c) else {
+        return;
+    };
+    let list = |plural: &str| {
+        let r = kubemu_controllers::res("", plural);
+        cs.list(&object::storage_resource(r), None)
+            .0
+            .into_iter()
+            .map(|(_, o)| o.value.clone())
+            .collect::<Vec<_>>()
+    };
+    let mut held: BTreeMap<String, String> = BTreeMap::new();
+    let mut bad = Vec::new();
+    let mut hold = |ip: &str, cidr: Cidr, who: String| {
+        if !ip.parse().is_ok_and(|a| cidr.contains(a)) {
+            bad.push(format!("{who} has {ip}, outside {cidr}"));
+        }
+        if let Some(other) = held.insert(ip.to_owned(), who.clone()) {
+            bad.push(format!("{who} and {other} share {ip}"));
+        }
+    };
+    for s in list("services") {
+        for ip in s["spec"]["clusterIPs"].as_array().into_iter().flatten() {
+            let ip = ip.as_str().unwrap_or("");
+            if ip != "None" {
+                let who = format!("service {}/{}", object::namespace(&s), object::name(&s));
+                hold(ip, net.service_cidr, who);
+            }
+        }
+    }
+    for p in list("pods") {
+        if !kubemu_controllers::kubelet::holds_pod_ip(&p) {
+            continue;
+        }
+        for ip in p["status"]["podIPs"].as_array().into_iter().flatten() {
+            let who = format!("pod {}/{}", object::namespace(&p), object::name(&p));
+            hold(ip["ip"].as_str().unwrap_or(""), net.pod_cidr, who);
+        }
+    }
+    for b in bad {
+        sim.violations.push(format!("step {}: {c}: {b}", sim.step));
+    }
+}
+
 /// End-state invariants once controllers have settled.
 fn check_settled(sim: &mut Sim<'_>, c: &str) {
     let mut all: Vec<(&str, Value)> = Vec::new();
@@ -676,8 +797,12 @@ fn check_settled(sim: &mut Sim<'_>, c: &str) {
     }
     for svc in of(&all, "services") {
         let ns = object::namespace(svc);
+        let app = &svc["spec"]["selector"]["app"];
+        if app.is_null() {
+            continue;
+        }
         let mut want: Vec<&str> = of(&all, "pods")
-            .filter(|p| object::namespace(p) == ns && p["metadata"]["labels"]["app"] == "web")
+            .filter(|p| object::namespace(p) == ns && p["metadata"]["labels"]["app"] == *app)
             .filter_map(|p| p["status"]["podIP"].as_str())
             .collect();
         want.sort_unstable();
@@ -691,7 +816,8 @@ fn check_settled(sim: &mut Sim<'_>, c: &str) {
             .collect();
         have.sort_unstable();
         if ep.is_none() || have != want {
-            bad.push(format!("endpoints {ns}/web are {have:?}, want {want:?}"));
+            let name = object::name(svc);
+            bad.push(format!("endpoints {ns}/{name} are {have:?}, want {want:?}"));
         }
     }
     for b in bad {

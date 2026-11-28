@@ -12,7 +12,8 @@ cargo build -q -p kubemu-cli
 work=$(mktemp -d)
 log="$work/up.log"
 export KUBECONFIG="$work/kubeconfig"
-target/debug/kubemu up --port 0 --cluster smoke --kubeconfig "$KUBECONFIG" 2>"$log" &
+target/debug/kubemu up --port 0 --cluster smoke --kubeconfig "$KUBECONFIG" \
+  --pod-cidr 10.201.0.0/24 --service-cidr 10.200.0.0/24 2>"$log" &
 pid=$!
 trap 'kill $pid 2>/dev/null || true; rm -rf "$work"' EXIT
 for _ in $(seq 100); do grep -q serving "$log" && break; sleep 0.1; done
@@ -50,9 +51,14 @@ spec:
   ports: [{port: 8080, targetPort: http}]
 YAML
 k apply -f "$work/app.yaml" >/dev/null
+# Cluster IPs come from --service-cidr; the `kubernetes` Service has the first.
+expect "$(k get svc kubernetes -o jsonpath='{.spec.clusterIP}')" "10.200.0.1" "kubernetes Service"
+svcip=$(k -n smoke get svc web -o jsonpath='{.spec.clusterIP}')
+[[ $svcip == 10.200.0.* ]] || fail "Service IP $svcip outside --service-cidr"
 sed -i.bak 's/mode: fast/mode: slow/' "$work/app.yaml"
 expect "$(k apply -f "$work/app.yaml" | grep settings)" "configmap/settings configured" "re-apply"
 expect "$(k -n smoke get cm settings -o jsonpath='{.data.mode}')" "slow" "apply updated data"
+expect "$(k -n smoke get svc web -o jsonpath='{.spec.clusterIP}')" "$svcip" "re-apply keeps the cluster IP"
 
 # Watch while writing.
 k -n smoke get cm -w --output-watch-events --no-headers >"$work/watch" 2>&1 &
@@ -71,6 +77,7 @@ expect "$(k get nodes -o name)" "node/smoke-node" "logical node"
 k -n smoke wait --for=condition=Ready pod/web --timeout=10s >/dev/null
 expect "$(k -n smoke get sa default -o name)" "serviceaccount/default" "default ServiceAccount"
 ip=$(k -n smoke get pod web -o jsonpath='{.status.podIP}')
+[[ $ip == 10.201.0.* ]] || fail "pod IP $ip outside --pod-cidr"
 expect "$(k -n smoke get endpoints web -o jsonpath='{.subsets[0].addresses[0].ip}:{.subsets[0].ports[0].port}')" "$ip:80" "endpoints"
 expect "$(k -n smoke get endpointslices -l kubernetes.io/service-name=web -o jsonpath='{.items[0].endpoints[0].addresses[0]}')" "$ip" "endpointslice"
 

@@ -861,3 +861,186 @@ fn openapi_v2_as_protobuf() {
     let r = t.raw(HttpRequest::new("GET", "/openapi/v2").with_accept("application/json"));
     assert_eq!(r.content_type, "application/json");
 }
+
+#[test]
+fn service_cluster_ips() {
+    let mut t = T::new();
+    let svcs = "/api/v1/namespaces/default/services";
+    let svc = |name: &str, spec: Value| {
+        let mut spec = spec;
+        if spec.get("ports").is_none() && spec["type"] != "ExternalName" {
+            spec["ports"] = json!([{"port": 80}]);
+        }
+        json!({"metadata": {"name": name}, "spec": spec})
+    };
+    let ip_fields = |v: &Value| {
+        let s = &v["spec"];
+        (
+            s["clusterIP"].clone(),
+            s["clusterIPs"].clone(),
+            s["ipFamilies"].clone(),
+            s["ipFamilyPolicy"].clone(),
+        )
+    };
+    let message = |v: &Value| v["message"].as_str().unwrap_or("").to_owned();
+
+    // The first cluster of a process gets 10.128.0.0/16 for Services; the
+    // `kubernetes` Service holds its first address.
+    let (s, k) = t.get(&format!("{svcs}/kubernetes"));
+    assert_eq!(s, 200);
+    assert_eq!(
+        ip_fields(&k),
+        (
+            json!("10.128.0.1"),
+            json!(["10.128.0.1"]),
+            json!(["IPv4"]),
+            json!("SingleStack")
+        )
+    );
+
+    // Allocated: in the CIDR, mirrored into clusterIPs, families defaulted.
+    let (s, a) = t.post(svcs, svc("a", json!({"selector": {"app": "a"}})));
+    assert_eq!(s, 201, "{a}");
+    let ip = a["spec"]["clusterIP"].as_str().unwrap().to_owned();
+    let addr: std::net::Ipv4Addr = ip.parse().unwrap();
+    assert!(
+        addr.octets()[..2] == [10, 128] && ip != "10.128.0.1",
+        "{ip}"
+    );
+    assert_eq!(a["spec"]["clusterIPs"], json!([ip]));
+    assert_eq!(a["spec"]["ipFamilies"], json!(["IPv4"]));
+    assert_eq!(a["spec"]["ipFamilyPolicy"], "SingleStack");
+
+    // A requested IP is honoured once; the 1.37 allocator's messages.
+    let req = |ip: &str| svc("b", json!({"clusterIP": ip}));
+    assert_eq!(t.post(svcs, req("10.128.7.7")).0, 201);
+    let (s, e) = t.post(svcs, svc("c", json!({"clusterIP": "10.128.7.7"})));
+    assert_eq!(s, 422);
+    assert_eq!(
+        message(&e),
+        r#"Service "c" is invalid: spec.clusterIPs: Invalid value: ["10.128.7.7"]: failed to allocate IP 10.128.7.7: provided IP is already allocated"#
+    );
+    let (_, e) = t.post(svcs, svc("c", json!({"clusterIP": "10.0.0.1"})));
+    assert!(
+        message(&e).ends_with(
+            "failed to allocate IP 10.0.0.1: the provided network does not match the current range"
+        ),
+        "{e}"
+    );
+    let (_, e) = t.post(svcs, svc("c", json!({"clusterIP": "10.128.255.255"})));
+    assert!(message(&e).ends_with("the provided IP (10.128.255.255) is not in the valid range. The range of valid IPs is 10.128.0.0/16"), "{e}");
+    // Deleting a Service frees its IP.
+    assert_eq!(t.delete(&format!("{svcs}/b")).0, 200);
+    assert_eq!(
+        t.post(svcs, svc("c", json!({"clusterIP": "10.128.7.7"}))).0,
+        201
+    );
+
+    // Headless: no IP. Without a selector upstream defaults to dual-stack
+    // families even on a single-stack cluster.
+    let (_, h) = t.post(
+        svcs,
+        svc("h", json!({"clusterIP": "None", "selector": {"app": "a"}})),
+    );
+    assert_eq!(
+        ip_fields(&h),
+        (
+            json!("None"),
+            json!(["None"]),
+            json!(["IPv4"]),
+            json!("SingleStack")
+        )
+    );
+    let (_, h) = t.post(svcs, svc("h2", json!({"clusterIP": "None"})));
+    assert_eq!(
+        ip_fields(&h),
+        (
+            json!("None"),
+            json!(["None"]),
+            json!(["IPv4", "IPv6"]),
+            json!("RequireDualStack")
+        )
+    );
+    // Families the cluster lacks.
+    let (s, e) = t.post(
+        svcs,
+        svc("d", json!({"ipFamilyPolicy": "RequireDualStack"})),
+    );
+    assert_eq!(s, 422);
+    assert!(message(&e).ends_with(r#"spec.ipFamilyPolicy: Invalid value: "RequireDualStack": this cluster is not configured for dual-stack services"#), "{e}");
+    let (_, e) = t.post(svcs, svc("d", json!({"ipFamilies": ["IPv6"]})));
+    assert!(
+        message(&e).ends_with(
+            r#"spec.ipFamilies[0]: Invalid value: "IPv6": not configured on this cluster"#
+        ),
+        "{e}"
+    );
+    let (_, p) = t.post(svcs, svc("d", json!({"ipFamilyPolicy": "PreferDualStack"})));
+    assert_eq!(p["spec"]["ipFamilies"], json!(["IPv4"]));
+
+    // Updates keep the IP when it is left out, and may not change it.
+    let mut a2 = a.clone();
+    let spec = a2["spec"].as_object_mut().unwrap();
+    for k in ["clusterIP", "clusterIPs", "ipFamilies", "ipFamilyPolicy"] {
+        spec.remove(k);
+    }
+    let (s, u) = t.put(&format!("{svcs}/a"), a2);
+    assert_eq!(s, 200, "{u}");
+    assert_eq!(ip_fields(&u), ip_fields(&a));
+    let mut moved = u.clone();
+    moved["spec"]["clusterIP"] = json!("10.128.9.9");
+    moved["spec"]["clusterIPs"] = json!(["10.128.9.9"]);
+    let (s, e) = t.put(&format!("{svcs}/a"), moved);
+    assert_eq!(s, 422);
+    assert!(
+        message(&e).ends_with(
+            r#"spec.clusterIPs[0]: Invalid value: ["10.128.9.9"]: may not change once set"#
+        ),
+        "{e}"
+    );
+
+    // ExternalName gets no IP; turning into ClusterIP allocates one,
+    // turning back drops it.
+    let (_, x) = t.post(
+        svcs,
+        svc(
+            "x",
+            json!({"type": "ExternalName", "externalName": "db.example.com"}),
+        ),
+    );
+    assert_eq!(
+        ip_fields(&x),
+        (Value::Null, Value::Null, Value::Null, Value::Null)
+    );
+    let mut x2 = x.clone();
+    x2["spec"] = json!({"type": "ClusterIP", "ports": [{"port": 80}]});
+    let (s, x2) = t.put(&format!("{svcs}/x"), x2);
+    assert_eq!(s, 200, "{x2}");
+    assert!(
+        x2["spec"]["clusterIP"]
+            .as_str()
+            .unwrap()
+            .starts_with("10.128.")
+    );
+    let mut x3 = x2.clone();
+    x3["spec"]["type"] = json!("ExternalName");
+    x3["spec"]["externalName"] = json!("db.example.com");
+    let (s, x3) = t.put(&format!("{svcs}/x"), x3);
+    assert_eq!(s, 200, "{x3}");
+    assert_eq!(
+        ip_fields(&x3),
+        (Value::Null, Value::Null, Value::Null, Value::Null)
+    );
+
+    // A fork has its parent's CIDRs and IPs.
+    t.api.fork_cluster("c", "f").unwrap();
+    let r = t
+        .api
+        .handle(
+            "f",
+            &HttpRequest::new("POST", svcs).json(&svc("e", json!({"clusterIP": "10.128.7.7"}))),
+        )
+        .response();
+    assert_eq!(r.status, 422);
+    assert_eq!(t.api.network("f"), t.api.network("c"));
+}

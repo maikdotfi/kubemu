@@ -8,16 +8,19 @@
 //! termination message policies, requests against limits; restart and
 //! DNS policies; node selector, hostname and subdomain. For services:
 //! ports (names, numbers, protocols, target ports), type, session
-//! affinity, selector, external names, node ports on ClusterIP services.
+//! affinity, selector, external names, node ports on ClusterIP services,
+//! cluster IPs and IP families (on create, and that they do not change).
 //! Everything else is listed in [`UNPORTED`] and accepted unchecked.
 
 use std::collections::BTreeSet;
+use std::net::IpAddr;
 
 use kubemu_api_types::ResourceInfo;
 use serde_json::{Map, Value};
 
 use crate::field::{
-    Cause, duplicate, forbidden, invalid, invalid_num, not_found, not_supported, required,
+    Cause, duplicate, forbidden, invalid, invalid_json, invalid_num, not_found, not_supported,
+    required,
 };
 use crate::meta::{self, NameRule, name_errors, name_rule};
 use crate::quantity::Quantity;
@@ -40,7 +43,10 @@ pub const UNPORTED: &[(&str, &str)] = &[
         "Pod",
         "host port conflicts; pod-level resources; OS-specific rules",
     ),
-    ("Service", "cluster IPs, IP families, external IPs"),
+    (
+        "Service",
+        "external IPs; updates: type-dependent fields and traffic policies",
+    ),
     (
         "Service",
         "traffic policies, health check and load balancer fields",
@@ -56,16 +62,29 @@ pub const UNPORTED: &[(&str, &str)] = &[
     ("ServiceAccount", "everything but metadata"),
 ];
 
-/// Validates `obj`, an object of `r` about to be stored: metadata first,
+/// Validates `obj`, an object of `r` about to be created: metadata first,
 /// then the kind's own rules, in upstream order.
 pub fn validate(r: &ResourceInfo, obj: &Value) -> Vec<Cause> {
+    validate_with(r, obj, None)
+}
+
+/// Validates `obj` replacing `old`: the create rules, plus what may not
+/// change (only Services' cluster IPs and families so far).
+pub fn validate_update(r: &ResourceInfo, obj: &Value, old: &Value) -> Vec<Cause> {
+    validate_with(r, obj, Some(old))
+}
+
+fn validate_with(r: &ResourceInfo, obj: &Value, old: Option<&Value>) -> Vec<Cause> {
     let mut c = Vec::new();
     object_meta(r, obj, &mut c);
     let spec = obj.get("spec").and_then(Value::as_object);
     let empty = Map::new();
     match (r.group, r.kind) {
         ("", "Pod") => pod_spec(spec.unwrap_or(&empty), &mut c),
-        ("", "Service") => service_spec(spec.unwrap_or(&empty), &mut c),
+        ("", "Service") => {
+            let old_spec = old.map(|o| o.get("spec").and_then(Value::as_object).unwrap_or(&empty));
+            service_spec(spec.unwrap_or(&empty), old_spec, &mut c)
+        }
         _ => {}
     }
     c
@@ -432,18 +451,289 @@ fn nonnegative(v: &Value, path: &str, c: &mut Vec<Cause>) {
     }
 }
 
+/// The strings of a string list field (`clusterIPs`, `ipFamilies`).
+fn strs<'a>(m: &'a Map<String, Value>, k: &str) -> Vec<&'a str> {
+    m.get(k)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect()
+}
+
+/// `isHeadlessService`: `clusterIPs` is exactly `["None"]`.
+pub fn is_headless(spec: &Map<String, Value>) -> bool {
+    strs(spec, "clusterIPs") == ["None"]
+}
+
+/// An IPv4 address as Go's `netutils.ParseIPSloppy` reads it: leading
+/// zeros allowed in each octet.
+fn sloppy_ipv4(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('.').collect();
+    parts.len() == 4
+        && parts.iter().all(|p| {
+            let digits = p.trim_start_matches('0');
+            !p.is_empty()
+                && p.bytes().all(|b| b.is_ascii_digit())
+                && digits.len() <= 3
+                && digits.parse::<u16>().unwrap_or(0) <= 255
+        })
+}
+
+/// `IsValidIPForLegacyField` with strict validation (on by default since
+/// 1.36): IPs a stored object already had pass unchecked.
+fn legacy_ip(path: &str, value: &str, existing: &[&str], c: &mut Vec<Cause>) -> bool {
+    if existing.contains(&value) {
+        return true;
+    }
+    let detail = match value.parse::<IpAddr>() {
+        Ok(IpAddr::V6(a)) if a.to_ipv4_mapped().is_some() => {
+            "must not be an IPv4-mapped IPv6 address"
+        }
+        Ok(_) => return true,
+        Err(_) if sloppy_ipv4(value) => "must not have leading 0s",
+        Err(_) => "must be a valid IP address, (e.g. 10.9.8.7 or 2001:db8::ffff)",
+    };
+    c.push(invalid(path, value, detail));
+    false
+}
+
+/// `netutils.IsIPv6String`, for IPs that passed [`legacy_ip`].
+fn is_ipv6(ip: &str) -> bool {
+    ip.parse::<std::net::Ipv6Addr>()
+        .is_ok_and(|a| a.to_ipv4_mapped().is_none())
+}
+
+fn json_list(xs: &[&str]) -> Value {
+    if xs.is_empty() {
+        Value::Null
+    } else {
+        Value::from(xs.to_vec())
+    }
+}
+
+/// `ValidateServiceClusterIPsRelatedFields`: `clusterIP`, `clusterIPs`,
+/// `ipFamilies` and `ipFamilyPolicy` on their own and against each other.
+/// The API also runs it before allocating cluster IPs, as upstream's
+/// allocator does.
+pub fn service_cluster_ips(
+    spec: &Map<String, Value>,
+    old: Option<&Map<String, Value>>,
+) -> Vec<Cause> {
+    let mut c = Vec::new();
+    if str_of(spec, "type") == "ExternalName" {
+        return c;
+    }
+    let ip = str_of(spec, "clusterIP");
+    let ips = strs(spec, "clusterIPs");
+    let families = strs(spec, "ipFamilies");
+    if !ip.is_empty() {
+        if ips.is_empty() {
+            c.push(required("spec.clusterIPs", ""));
+        } else if ips[0] != ip {
+            c.push(invalid_json(
+                "spec.clusterIPs",
+                &json_list(&ips),
+                "first value must match `clusterIP`",
+            ));
+        }
+    } else if !ips.is_empty() {
+        c.push(invalid_json(
+            "spec.clusterIPs",
+            &json_list(&ips),
+            "must be empty when `clusterIP` is not specified",
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    for (i, f) in families.iter().enumerate() {
+        let path = format!("spec.ipFamilies[{i}]");
+        if !matches!(*f, "IPv4" | "IPv6") {
+            c.push(not_supported(&path, f, &["IPv4", "IPv6"]));
+        }
+        if !seen.insert(*f) {
+            c.push(duplicate(&path, f));
+        }
+    }
+    if let Some(p) = spec.get("ipFamilyPolicy").and_then(Value::as_str)
+        && !matches!(p, "SingleStack" | "PreferDualStack" | "RequireDualStack")
+    {
+        c.push(not_supported(
+            "spec.ipFamilyPolicy",
+            p,
+            &["PreferDualStack", "RequireDualStack", "SingleStack"],
+        ));
+    }
+    let existing = old.map(|o| strs(o, "clusterIPs")).unwrap_or_default();
+    let mut bad_ips = false;
+    for (i, x) in ips.iter().enumerate() {
+        if i == 0 && *x == "None" {
+            if ips.len() > 1 {
+                bad_ips = true;
+                c.push(invalid_json(
+                    "spec.clusterIPs",
+                    &json_list(&ips),
+                    "'None' must be the first and only value",
+                ));
+            }
+            continue;
+        }
+        bad_ips |= !legacy_ip(&format!("spec.clusterIPs[{i}]"), x, &existing, &mut c);
+    }
+    if ips.len() > 2 {
+        c.push(invalid_json(
+            "spec.clusterIPs",
+            &json_list(&ips),
+            "may only hold up to 2 values",
+        ));
+    }
+    if bad_ips {
+        return c;
+    }
+    if ips.len() > 1 && !(ips.iter().any(|x| is_ipv6(x)) && ips.iter().any(|x| !is_ipv6(x))) {
+        c.push(invalid_json(
+            "spec.clusterIPs",
+            &json_list(&ips),
+            "may specify no more than one IP for each IP family",
+        ));
+    }
+    if !is_headless(spec) {
+        for (i, (x, f)) in ips.iter().zip(&families).enumerate() {
+            let want = match (*f, is_ipv6(x)) {
+                ("IPv4", true) => "IPv4",
+                ("IPv6", false) => "IPv6",
+                _ => continue,
+            };
+            c.push(invalid(
+                &format!("spec.clusterIPs[{i}]"),
+                x,
+                &format!("expected an {want} value as indicated by `ipFamilies[{i}]`"),
+            ));
+        }
+    }
+    c
+}
+
+/// `validateUpgradeDowngradeClusterIPs` and `...IPFamilies`: cluster IPs
+/// and families do not change once set, except to or from ExternalName.
+fn service_update(spec: &Map<String, Value>, old: &Map<String, Value>, c: &mut Vec<Cause>) {
+    if str_of(spec, "type") == "ExternalName" || str_of(old, "type") == "ExternalName" {
+        return;
+    }
+    let (new_headless, old_headless) = (is_headless(spec), is_headless(old));
+    let policy = spec.get("ipFamilyPolicy").cloned().unwrap_or(Value::Null);
+    let single = policy == "SingleStack";
+    let (ips, old_ips) = (strs(spec, "clusterIPs"), strs(old, "clusterIPs"));
+    let ips_json = json_list(&ips);
+    let changed = |i: usize| {
+        invalid_json(
+            &format!("spec.clusterIPs[{i}]"),
+            &ips_json,
+            "may not change once set",
+        )
+    };
+    if !(old_headless && new_headless) {
+        if old_ips.len() == ips.len() {
+            for (i, (a, b)) in old_ips.iter().zip(&ips).enumerate() {
+                if a != b {
+                    c.push(changed(i));
+                }
+            }
+        } else if old_ips.len() > ips.len() {
+            if ips.is_empty() {
+                c.push(invalid_json(
+                    "spec.clusterIPs[0]",
+                    &ips_json,
+                    "primary clusterIP can not be unset",
+                ));
+            }
+            if !old_ips.is_empty() && !ips.is_empty() && ips[0] != old_ips[0] {
+                c.push(changed(0));
+            }
+            if ips.len() == 1 && !single {
+                c.push(invalid_json(
+                    "spec.ipFamilyPolicy",
+                    &policy,
+                    "must be set to 'SingleStack' when releasing the secondary clusterIP",
+                ));
+            }
+        } else if !old_ips.is_empty() && ips[0] != old_ips[0] {
+            c.push(changed(0));
+        }
+    }
+    if new_headless != old_headless || new_headless {
+        return;
+    }
+    let (fams, old_fams) = (strs(spec, "ipFamilies"), strs(old, "ipFamilies"));
+    let changed_fam = |v: &[&str]| {
+        invalid_json(
+            "spec.ipFamilies[0]",
+            &json_list(v),
+            "may not change once set",
+        )
+    };
+    if old_fams.len() == fams.len() {
+        for (a, b) in old_fams.iter().zip(&fams) {
+            if a != b {
+                c.push(changed_fam(&fams));
+            }
+        }
+    } else if old_fams.len() > fams.len() {
+        if ips.is_empty() {
+            c.push(invalid_json(
+                "spec.ipFamilies[0]",
+                &json_list(&fams),
+                "primary ipFamily can not be unset",
+            ));
+        }
+        if !fams.is_empty() && fams[0] != old_fams[0] {
+            c.push(changed_fam(&ips));
+        }
+        if fams.len() == 1 && !single {
+            c.push(invalid_json(
+                "spec.ipFamilyPolicy",
+                &policy,
+                "must be set to 'SingleStack' when releasing the secondary ipFamily",
+            ));
+        }
+    } else if !old_fams.is_empty() && !fams.is_empty() && fams[0] != old_fams[0] {
+        c.push(changed_fam(&ips));
+    }
+}
+
 /// `validateService`, the ported part.
-fn service_spec(spec: &Map<String, Value>, c: &mut Vec<Cause>) {
+fn service_spec(spec: &Map<String, Value>, old: Option<&Map<String, Value>>, c: &mut Vec<Cause>) {
     let ty = str_of(spec, "type");
     let ports: Vec<&Map<String, Value>> = objects(spec, "ports").collect();
-    let headless = spec
-        .get("clusterIPs")
-        .and_then(Value::as_array)
-        .and_then(|a| a.first())
-        .and_then(Value::as_str)
-        == Some("None");
+    let headless = is_headless(spec);
     if ports.is_empty() && !headless && ty != "ExternalName" {
         c.push(required("spec.ports", ""));
+    }
+    if headless && matches!(ty, "LoadBalancer" | "NodePort") {
+        c.push(invalid(
+            "spec.clusterIPs[0]",
+            "None",
+            &format!("may not be set to 'None' for {ty} services"),
+        ));
+    }
+    if ty == "ExternalName" {
+        if !strs(spec, "clusterIPs").is_empty() {
+            c.push(forbidden(
+                "spec.clusterIPs",
+                "may not be set for ExternalName services",
+            ));
+        }
+        if !strs(spec, "ipFamilies").is_empty() {
+            c.push(forbidden(
+                "spec.ipFamilies",
+                "may not be set for ExternalName services",
+            ));
+        }
+        if spec.get("ipFamilyPolicy").is_some_and(|v| !v.is_null()) {
+            c.push(forbidden(
+                "spec.ipFamilyPolicy",
+                "may not be set for ExternalName services",
+            ));
+        }
     }
     if ty == "ExternalName" {
         let cname = str_of(spec, "externalName");
@@ -498,6 +788,10 @@ fn service_spec(spec: &Map<String, Value>, c: &mut Vec<Cause>) {
             "spec.sessionAffinityConfig",
             "must not be set when session affinity is None",
         ));
+    }
+    c.extend(service_cluster_ips(spec, old));
+    if let Some(old) = old {
+        service_update(spec, old, c);
     }
     const TYPES: [&str; 4] = ["ClusterIP", "ExternalName", "LoadBalancer", "NodePort"];
     if ty.is_empty() {

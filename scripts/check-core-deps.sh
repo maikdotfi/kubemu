@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CORE=(kubemu-env kubemu-env-sim kubemu-store kubemu-api-types kubemu-patch kubemu-proto kubemu-validation kubemu-api
-      kubemu-controllers kubemu-scheduler kubemu-faults kubemu-snapshot)
+      kubemu-controllers kubemu-scheduler kubemu-faults kubemu-snapshot kubemu-net)
 BANNED='^(tokio|async-std|smol|hyper|axum|mio) '
 fail=0
 for c in "${CORE[@]}"; do

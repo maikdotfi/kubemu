@@ -26,16 +26,18 @@ mod meta;
 pub mod object;
 mod read;
 mod selector;
+mod services;
 mod status;
 pub mod strategy;
 mod watch;
 mod write;
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
 use kubemu_api_types::{RESOURCES, ResourceInfo, resource};
 use kubemu_env::{Env, MonoTime};
+pub use kubemu_net::{Cidr, ClusterNetwork};
 use kubemu_store::{ClusterStore, ResourceVersion, Store};
 use serde_json::{Value, json};
 
@@ -62,6 +64,10 @@ pub struct Api {
     store: Store<Obj>,
     log_capacity: usize,
     trace: Vec<String>,
+    /// Each cluster's CIDRs; forks copy their parent's.
+    networks: BTreeMap<String, ClusterNetwork>,
+    /// Clusters created with default CIDRs so far.
+    defaulted: usize,
 }
 
 /// One request, resolved against the resource table.
@@ -110,6 +116,8 @@ impl Api {
             store: Store::new(),
             log_capacity,
             trace: Vec::new(),
+            networks: BTreeMap::new(),
+            defaulted: 0,
         }
     }
 
@@ -121,30 +129,83 @@ impl Api {
         &self.store
     }
 
-    /// Creates an empty cluster with the namespaces the apiserver creates
-    /// at startup. Returns `false` if it already exists.
+    /// Creates an empty cluster with the default CIDRs for the next
+    /// cluster of this process ([`ClusterNetwork::default_for`]). Returns
+    /// `false` if it already exists.
+    ///
+    /// # Panics
+    ///
+    /// Past 64 clusters with default CIDRs; give them CIDRs with
+    /// [`Api::add_cluster_with`].
     pub fn add_cluster(&mut self, name: &str) -> bool {
         if self.store.cluster(name).is_ok() {
             return false;
         }
+        let net = ClusterNetwork::default_for(self.defaulted)
+            .expect("more than 64 clusters need explicit CIDRs");
+        self.defaulted += 1;
+        self.add_cluster_with(name, net)
+    }
+
+    /// Creates an empty cluster with the namespaces and the `kubernetes`
+    /// Service the apiserver creates at startup. Returns `false` if it
+    /// already exists.
+    pub fn add_cluster_with(&mut self, name: &str, net: ClusterNetwork) -> bool {
+        if self.store.cluster(name).is_ok() {
+            return false;
+        }
         *self.store.add_cluster(name) = ClusterStore::new(self.log_capacity);
+        self.networks.insert(name.to_owned(), net);
         let ns = resource("", "v1", "namespaces").expect("namespaces are served");
         for n in strategy::SYSTEM_NAMESPACES {
             let body = json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": n}});
-            let req = HttpRequest::new("POST", "/api/v1/namespaces").json(&body);
-            let ctx = Ctx {
-                cluster: name,
-                r: ns,
-                namespace: None,
-                name: None,
-                subresource: None,
-                query: Query::default(),
-            };
-            self.create(&ctx, &req)
-                .expect("system namespaces are valid");
+            self.create_system(name, ns, None, &body);
         }
-        self.trace(format!("cluster {name} created"));
+        // Its endpoints (the API server, for pods) wait for pod
+        // networking (README §12.3 step 6).
+        let svc = resource("", "v1", "services").expect("services are served");
+        let body = json!({
+            "apiVersion": "v1", "kind": "Service",
+            "metadata": {"name": "kubernetes", "labels": {"component": "apiserver", "provider": "kubernetes"}},
+            "spec": {
+                "clusterIP": net.service_cidr.first_host().to_string(),
+                "ports": [{"name": "https", "port": 443, "protocol": "TCP", "targetPort": 6443}],
+            },
+        });
+        self.create_system(name, svc, Some("default"), &body);
+        self.trace(format!(
+            "cluster {name} created (pods {}, services {})",
+            net.pod_cidr, net.service_cidr
+        ));
         true
+    }
+
+    fn create_system(
+        &mut self,
+        cluster: &str,
+        r: &'static ResourceInfo,
+        namespace: Option<&str>,
+        body: &Value,
+    ) {
+        let req = HttpRequest::new(
+            "POST",
+            &object::path(r, namespace.unwrap_or(""), None, None),
+        )
+        .json(body);
+        let ctx = Ctx {
+            cluster,
+            r,
+            namespace: namespace.map(str::to_owned),
+            name: None,
+            subresource: None,
+            query: Query::default(),
+        };
+        self.create(&ctx, &req).expect("system objects are valid");
+    }
+
+    /// A cluster's CIDRs.
+    pub fn network(&self, cluster: &str) -> Option<&ClusterNetwork> {
+        self.networks.get(cluster)
     }
 
     /// Forks cluster `from` into a new cluster `to` in O(1) (ADR 0002).
@@ -153,6 +214,9 @@ impl Api {
             .fork(from, to)
             .map(|_| ())
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        if let Some(net) = self.networks.get(from).copied() {
+            self.networks.insert(to.to_owned(), net);
+        }
         self.trace(format!("cluster {to} forked from {from}"));
         Ok(())
     }

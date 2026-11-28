@@ -9,9 +9,11 @@ use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout};
 
 mod proto;
+mod service;
 mod validation;
 
 pub use proto::{openapi_v2_pb, proto_case};
+pub use service::service_case;
 pub use validation::{default_case, quantity_case, strategy_case, validate_case};
 
 use kubemu_api_types::{RESOURCES, Schema, Ty};

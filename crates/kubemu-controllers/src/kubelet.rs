@@ -5,39 +5,59 @@
 //! statuses, QoS class). A pod being deleted gracefully is finished with
 //! a forced delete, as the kubelet does once its containers stop.
 //!
+//! Pod IPs come from the cluster's pod CIDR (ADR 0003), allocated when a
+//! pod starts. The node owns the whole CIDR; its first address is the
+//! bridge gateway. The IPs in use are those of the live pods in the store,
+//! so nothing else records them.
+//!
 //! The real executor (youki, M2) replaces the "run" part; registration
 //! and status reporting stay this shape.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use kubemu_api::object;
+use kubemu_api::{Cidr, object};
 use kubemu_env::{Env, MonoTime};
 use serde_json::{Value, json};
 
 use crate::{Action, Controller, View, res};
 
 pub const NODE_IP: &str = "172.18.0.2";
-const POD_CIDR: &str = "10.244.0.0/24";
 
 #[derive(Debug)]
 pub struct SimKubelet {
     env: Env,
     node: String,
-    /// Pod UID -> IP, so a retried status write keeps its IP.
-    ips: BTreeMap<String, String>,
-    next_ip: u32,
+    pod_cidr: Cidr,
     /// Pod UID -> when it is "started".
     ready_at: BTreeMap<String, MonoTime>,
 }
 
+/// Whether a pod holds its pod IP: it has one of its own and has not
+/// finished.
+pub fn holds_pod_ip(pod: &Value) -> bool {
+    pod["spec"]["hostNetwork"] != true
+        && !matches!(
+            pod["status"]["phase"].as_str(),
+            Some("Succeeded" | "Failed")
+        )
+}
+
+/// The pod IPs held by `pods`.
+pub fn pod_ips<'a>(pods: impl Iterator<Item = &'a Value>) -> BTreeSet<Ipv4Addr> {
+    pods.filter(|p| holds_pod_ip(p))
+        .flat_map(|p| p["status"]["podIPs"].as_array().into_iter().flatten())
+        .filter_map(|ip| ip["ip"].as_str()?.parse().ok())
+        .collect()
+}
+
 impl SimKubelet {
-    pub fn new(env: Env, node: &str) -> Self {
+    pub fn new(env: Env, node: &str, pod_cidr: Cidr) -> Self {
         Self {
             env,
             node: node.to_owned(),
-            ips: BTreeMap::new(),
-            next_ip: 0,
+            pod_cidr,
             ready_at: BTreeMap::new(),
         }
     }
@@ -48,17 +68,6 @@ impl SimKubelet {
 
     fn now_rfc3339(&self) -> String {
         kubemu_api::object::rfc3339_now(&self.env)
-    }
-
-    fn ip_for(&mut self, uid: &str) -> String {
-        if let Some(ip) = self.ips.get(uid) {
-            return ip.clone();
-        }
-        let n = self.next_ip;
-        self.next_ip += 1;
-        let ip = format!("10.244.{}.{}", n / 250, 2 + n % 250);
-        self.ips.insert(uid.to_owned(), ip.clone());
-        ip
     }
 
     fn node_object(&self) -> Value {
@@ -79,7 +88,7 @@ impl SimKubelet {
                     "beta.kubernetes.io/arch": "amd64",
                 },
             },
-            "spec": {"podCIDR": POD_CIDR, "podCIDRs": [POD_CIDR]},
+            "spec": {"podCIDR": self.pod_cidr.to_string(), "podCIDRs": [self.pod_cidr.to_string()]},
             "status": {
                 "capacity": resources,
                 "allocatable": resources,
@@ -110,14 +119,10 @@ impl SimKubelet {
         })
     }
 
-    fn running(&mut self, pod: &Value) -> Value {
+    /// The pod as Running, with IP `ip`.
+    fn running(&self, pod: &Value, ip: &str) -> Value {
         let uid = object::uid(pod).unwrap_or("").to_owned();
         let now = self.now_rfc3339();
-        let ip = if pod["spec"]["hostNetwork"] == true {
-            NODE_IP.to_owned()
-        } else {
-            self.ip_for(&uid)
-        };
         let cid = |name: &str| format!("kubemu://{}-{name}", &uid[..uid.len().min(8)]);
         let containers: Vec<Value> = pod["spec"]["containers"]
             .as_array()
@@ -240,7 +245,7 @@ impl Controller for SimKubelet {
             .map(str::to_owned)
             .collect();
         self.ready_at.retain(|u, _| live.contains(u));
-        self.ips.retain(|u, _| live.contains(u));
+        let mut used = pod_ips(view.list(pods, None).into_iter());
 
         let mut wake: Option<MonoTime> = None;
         for p in mine {
@@ -265,8 +270,30 @@ impl Controller for SimKubelet {
                 .entry(uid)
                 .or_insert(MonoTime(now.0 + delay.as_nanos() as u64));
             if now >= at {
-                let running = self.running(p);
-                actions.push(Action::update(pods, &running, Some("status")));
+                let ip = if p["spec"]["hostNetwork"] == true {
+                    Some(NODE_IP.to_owned())
+                } else {
+                    let (first, last) = (self.pod_cidr.first_host(), self.pod_cidr.last_host());
+                    let gateway_skipped = Ipv4Addr::from(u32::from(first) + 1);
+                    kubemu_net::allocate(gateway_skipped, last, &used, self.env.rng.as_ref()).map(
+                        |ip| {
+                            used.insert(ip);
+                            ip.to_string()
+                        },
+                    )
+                };
+                match ip {
+                    Some(ip) => {
+                        let running = self.running(p, &ip);
+                        actions.push(Action::update(pods, &running, Some("status")));
+                    }
+                    // The pod CIDR is full: the pod waits, as a real
+                    // kubelet's sandbox would.
+                    None => {
+                        let retry = MonoTime(now.0 + Duration::from_secs(1).as_nanos() as u64);
+                        wake = Some(wake.map_or(retry, |w| w.min(retry)));
+                    }
+                }
             } else {
                 wake = Some(wake.map_or(at, |w| w.min(at)));
             }
@@ -288,7 +315,8 @@ mod tests {
         let sim = SimEnv::new(3);
         let mut api = Api::new(sim.env.clone());
         api.add_cluster("c");
-        let mut m = Manager::new(vec![Box::new(SimKubelet::new(sim.env.clone(), "n1"))]);
+        let cidr: Cidr = "10.244.0.0/30".parse().unwrap();
+        let mut m = Manager::new(vec![Box::new(SimKubelet::new(sim.env.clone(), "n1", cidr))]);
         m.settle(&mut api, "c", 5);
         assert_eq!(
             api.handle("c", &HttpRequest::new("GET", "/api/v1/nodes/n1"))
@@ -312,23 +340,37 @@ mod tests {
             .value()
             .unwrap();
         assert_eq!(p["status"]["phase"], "Running");
+        // A /30 has one address left after the gateway.
         assert_eq!(p["status"]["podIP"], "10.244.0.2");
         assert_eq!(p["status"]["qosClass"], "Guaranteed");
         assert_eq!(p["status"]["containerStatuses"][0]["ready"], true);
 
+        // The CIDR is full: a second pod waits for p's IP.
+        let mut q = pod.clone();
+        q["metadata"]["name"] = json!("q");
+        api.handle("c", &HttpRequest::new("POST", pods).json(&q));
+        let get = |api: &mut Api, n: &str| {
+            api.handle("c", &HttpRequest::new("GET", &format!("{pods}/{n}")))
+                .response()
+        };
+        for _ in 0..3 {
+            sim.clock.advance(Duration::from_secs(1));
+            m.settle(&mut api, "c", 5);
+        }
+        assert_eq!(
+            get(&mut api, "q").value().unwrap()["status"]["phase"],
+            "Pending"
+        );
+
         api.handle("c", &HttpRequest::new("DELETE", &format!("{pods}/p")));
-        assert_eq!(
-            api.handle("c", &HttpRequest::new("GET", &format!("{pods}/p")))
-                .status(),
-            200,
-            "graceful"
-        );
+        assert_eq!(get(&mut api, "p").status, 200, "graceful");
         m.settle(&mut api, "c", 5);
-        assert_eq!(
-            api.handle("c", &HttpRequest::new("GET", &format!("{pods}/p")))
-                .status(),
-            404
-        );
+        assert_eq!(get(&mut api, "p").status, 404);
+        sim.clock.advance(Duration::from_secs(1));
+        m.settle(&mut api, "c", 5);
+        let q = get(&mut api, "q").value().unwrap();
+        assert_eq!(q["status"]["phase"], "Running");
+        assert_eq!(q["status"]["podIP"], "10.244.0.2", "p's IP is free again");
     }
 
     #[test]

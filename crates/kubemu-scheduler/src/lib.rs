@@ -186,7 +186,11 @@ mod tests {
         let mut api = Api::new(sim.env.clone());
         api.add_cluster("c");
         let mut m = Manager::new(vec![
-            Box::new(SimKubelet::new(sim.env.clone(), "n1")),
+            Box::new(SimKubelet::new(
+                sim.env.clone(),
+                "n1",
+                api.network("c").unwrap().pod_cidr,
+            )),
             Box::new(Scheduler::new(sim.env.clone())),
         ]);
         m.settle(&mut api, "c", 3);

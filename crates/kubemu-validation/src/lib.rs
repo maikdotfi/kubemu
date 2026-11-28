@@ -14,4 +14,4 @@ pub mod validation;
 
 pub use defaults::default;
 pub use field::Cause;
-pub use validation::validate;
+pub use validation::{validate, validate_update};

@@ -141,8 +141,12 @@ pub trait Controller: Send + fmt::Debug {
 }
 
 /// The controllers of `kubemu up` minus the scheduler, which lives in
-/// `kubemu-scheduler`.
-pub fn standard(env: &kubemu_env::Env, cluster: &str) -> Vec<Box<dyn Controller>> {
+/// `kubemu-scheduler`, for a cluster with pod CIDR `pod_cidr`.
+pub fn standard(
+    env: &kubemu_env::Env,
+    cluster: &str,
+    pod_cidr: kubemu_api::Cidr,
+) -> Vec<Box<dyn Controller>> {
     vec![
         Box::new(namespace::NamespaceController),
         Box::new(serviceaccount::ServiceAccountController),
@@ -150,6 +154,7 @@ pub fn standard(env: &kubemu_env::Env, cluster: &str) -> Vec<Box<dyn Controller>
         Box::new(kubelet::SimKubelet::new(
             env.clone(),
             &format!("{cluster}-node"),
+            pod_cidr,
         )),
         Box::new(endpoints::EndpointsController),
     ]

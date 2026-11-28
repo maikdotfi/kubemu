@@ -100,8 +100,29 @@ pub fn prepare_for_create(r: &ResourceInfo, obj: &mut Value) {
 }
 
 /// `Canonicalize`, after validation: a namespace's name label, which
-/// defaulting could not set while a `generateName` was still pending.
+/// defaulting could not set while a `generateName` was still pending; and
+/// what the Service store's read decorator (`defaultOnRead`) does to every
+/// Service it returns, stored here so reads need nothing.
 pub fn canonicalize(r: &ResourceInfo, obj: &mut Value) {
+    if is(r, "", "services")
+        && let Some(spec) = obj.get_mut("spec").and_then(Value::as_object_mut)
+    {
+        let ip = spec
+            .get("clusterIP")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        let no_ips = spec
+            .get("clusterIPs")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty);
+        if !ip.is_empty() && no_ips {
+            spec.insert("clusterIPs".into(), json!([ip]));
+        }
+        if spec.get("type").and_then(Value::as_str) == Some("ExternalName") {
+            spec.remove("internalTrafficPolicy");
+        }
+    }
     if is(r, "", "namespaces") {
         let name = crate::object::name(obj).to_owned();
         let m = meta_mut(obj);
@@ -163,6 +184,9 @@ pub fn prepare_for_update(r: &ResourceInfo, new: &mut Value, old: &Value, sub: O
             }
         }
     }
+    if is(r, "", "services") {
+        drop_type_dependent_fields(new, old);
+    }
     if is(r, "", "namespaces") {
         // spec.finalizers changes only through /finalize.
         new["spec"] = old.get("spec").cloned().unwrap_or(json!({}));
@@ -171,6 +195,36 @@ pub fn prepare_for_update(r: &ResourceInfo, new: &mut Value, old: &Value, sub: O
         let g = old["metadata"]["generation"].as_i64().unwrap_or(1);
         let bump = generation_changes(r, new, old);
         meta_mut(new).insert("generation".into(), json!(if bump { g + 1 } else { g }));
+    }
+}
+
+/// `dropTypeDependentFields`, the cluster IP part: a Service turning
+/// ExternalName loses the cluster IPs, families and policy it had, unless
+/// the update changed them too (validation then refuses it).
+fn drop_type_dependent_fields(new: &mut Value, old: &Value) {
+    let needs_ip = |v: &Value| v["spec"]["type"] != "ExternalName";
+    if !needs_ip(old) || needs_ip(new) {
+        return;
+    }
+    let list = |v: &Value, k: &str| v["spec"][k].as_array().cloned().unwrap_or_default();
+    // The strategy's `sameClusterIPs` compares both fields.
+    let same_ips = new["spec"]["clusterIP"].as_str() == old["spec"]["clusterIP"].as_str()
+        && list(new, "clusterIPs") == list(old, "clusterIPs");
+    let same_families = list(new, "ipFamilies") == list(old, "ipFamilies");
+    let same_policy =
+        new["spec"]["ipFamilyPolicy"].as_str() == old["spec"]["ipFamilyPolicy"].as_str();
+    let Some(spec) = new.get_mut("spec").and_then(Value::as_object_mut) else {
+        return;
+    };
+    if same_ips {
+        spec.remove("clusterIP");
+        spec.remove("clusterIPs");
+    }
+    if same_families {
+        spec.remove("ipFamilies");
+    }
+    if same_policy {
+        spec.remove("ipFamilyPolicy");
     }
 }
 
