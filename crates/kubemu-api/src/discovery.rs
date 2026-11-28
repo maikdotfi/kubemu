@@ -261,7 +261,7 @@ mod tests {
             .clone();
         assert_eq!(pods["scope"], "Namespaced");
         assert_eq!(pods["shortNames"], json!(["po"]));
-        assert_eq!(pods["subresources"][0]["subresource"], "status");
+        assert_eq!(pods["subresources"][1]["subresource"], "status");
         let apis = aggregated(false).value().unwrap();
         assert!(
             apis["items"]

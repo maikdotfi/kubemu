@@ -301,6 +301,7 @@ dependencies = [
  "axum",
  "futures-util",
  "kubemu-api",
+ "kubemu-controllers",
  "kubemu-env",
  "kubemu-env-real",
  "serde_json",
@@ -313,13 +314,23 @@ version = "0.0.0"
 dependencies = [
  "kubemu-api",
  "kubemu-apiserver",
+ "kubemu-controllers",
  "kubemu-env-real",
+ "kubemu-scheduler",
  "tokio",
 ]
 
 [[package]]
 name = "kubemu-controllers"
 version = "0.0.0"
+dependencies = [
+ "kubemu-api",
+ "kubemu-api-types",
+ "kubemu-env",
+ "kubemu-env-sim",
+ "kubemu-store",
+ "serde_json",
+]
 
 [[package]]
 name = "kubemu-data"
@@ -389,15 +400,24 @@ version = "0.0.0"
 [[package]]
 name = "kubemu-scheduler"
 version = "0.0.0"
+dependencies = [
+ "kubemu-api",
+ "kubemu-controllers",
+ "kubemu-env",
+ "kubemu-env-sim",
+ "serde_json",
+]
 
 [[package]]
 name = "kubemu-sim"
 version = "0.0.0"
 dependencies = [
  "kubemu-api",
+ "kubemu-controllers",
  "kubemu-env",
  "kubemu-env-sim",
  "kubemu-faults",
+ "kubemu-scheduler",
  "serde_json",
 ]
 

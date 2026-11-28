@@ -96,3 +96,39 @@ pub fn as_list_item(v: &Value) -> Value {
     }
     v
 }
+
+/// The URL path of a resource collection, object or subresource.
+pub fn path(r: &ResourceInfo, namespace: &str, name: Option<&str>, sub: Option<&str>) -> String {
+    let mut p = if r.group.is_empty() {
+        format!("/api/{}", r.version)
+    } else {
+        format!("/apis/{}/{}", r.group, r.version)
+    };
+    if r.namespaced && !namespace.is_empty() {
+        p.push_str(&format!("/namespaces/{namespace}"));
+    }
+    p.push('/');
+    p.push_str(r.plural);
+    if let Some(n) = name {
+        p.push('/');
+        p.push_str(n);
+        if let Some(s) = sub {
+            p.push('/');
+            p.push_str(s);
+        }
+    }
+    p
+}
+
+/// The owner references of an object.
+pub fn owner_refs(v: &Value) -> &[Value] {
+    meta(v)
+        .and_then(|m| m.get("ownerReferences"))
+        .and_then(Value::as_array)
+        .map_or(&[], Vec::as_slice)
+}
+
+/// The Env's wall clock as `metav1.Time` (RFC 3339, seconds).
+pub fn rfc3339_now(env: &kubemu_env::Env) -> String {
+    crate::meta::now_rfc3339(env)
+}

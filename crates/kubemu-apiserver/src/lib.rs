@@ -74,6 +74,48 @@ pub async fn serve(
         .await
 }
 
+/// Longest a controller loop sleeps without a wake-up, as a safety net.
+const CONTROLLER_IDLE: Duration = Duration::from_secs(10);
+
+/// Most rounds per wake-up before yielding the lock to clients.
+const ROUNDS_PER_WAKE: usize = 20;
+
+/// Runs controllers against the served cluster: rounds until nothing
+/// changes, then waits for a write or the earliest requeue (ADR 0001: the
+/// shell carries out the core's actions).
+pub async fn run_controllers(s: Arc<Shared>, mut m: kubemu_controllers::Manager) {
+    loop {
+        let waker = Arc::clone(&s);
+        let mut notified = pin!(waker.changed.notified());
+        notified.as_mut().enable();
+        let (changed, wait) = {
+            let mut api = s.api.lock().expect("api lock poisoned");
+            let mut changed = 0;
+            let mut round = kubemu_controllers::Round::default();
+            for _ in 0..ROUNDS_PER_WAKE {
+                round = m.step(&mut api, &s.cluster);
+                changed += round.succeeded;
+                if round.succeeded == 0 {
+                    break;
+                }
+            }
+            let now = api.env().clock.now();
+            let wait = round.next_wake.map_or(CONTROLLER_IDLE, |t| {
+                t.saturating_since(now).min(CONTROLLER_IDLE)
+            });
+            (changed, wait)
+        };
+        if changed > 0 {
+            s.changed.notify_waiters();
+            continue;
+        }
+        tokio::select! {
+            () = notified => {}
+            () = tokio::time::sleep(wait) => {}
+        }
+    }
+}
+
 /// A kubeconfig for a cluster served at `server` (`http://host:port`).
 pub fn kubeconfig(cluster: &str, server: &str) -> String {
     let n = format!("kubemu-{cluster}");

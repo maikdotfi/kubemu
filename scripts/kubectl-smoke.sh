@@ -37,7 +37,14 @@ apiVersion: v1
 kind: Pod
 metadata: {name: web, namespace: smoke, labels: {app: web}}
 spec:
-  containers: [{name: web, image: nginx, ports: [{containerPort: 80}]}]
+  containers: [{name: web, image: nginx, ports: [{name: http, containerPort: 80}]}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: web, namespace: smoke}
+spec:
+  selector: {app: web}
+  ports: [{port: 8080, targetPort: http}]
 YAML
 k apply -f "$work/app.yaml" >/dev/null
 sed -i.bak 's/mode: fast/mode: slow/' "$work/app.yaml"
@@ -55,6 +62,15 @@ for _ in $(seq 50); do grep -q DELETED "$work/watch" && break; sleep 0.1; done
 kill $wpid 2>/dev/null || true
 expect "$(awk '{print $1}' "$work/watch" | tr '\n' ' ')" "ADDED MODIFIED MODIFIED DELETED " "watch events"
 
+# Controllers: the node, default ServiceAccounts, scheduling, the
+# simulated kubelet and endpoints.
+expect "$(k get nodes -o name)" "node/smoke-node" "logical node"
+k -n smoke wait --for=condition=Ready pod/web --timeout=10s >/dev/null
+expect "$(k -n smoke get sa default -o name)" "serviceaccount/default" "default ServiceAccount"
+ip=$(k -n smoke get pod web -o jsonpath='{.status.podIP}')
+expect "$(k -n smoke get endpoints web -o jsonpath='{.subsets[0].addresses[0].ip}:{.subsets[0].ports[0].port}')" "$ip:80" "endpoints"
+expect "$(k -n smoke get endpointslices -l kubernetes.io/service-name=web -o jsonpath='{.items[0].endpoints[0].addresses[0]}')" "$ip" "endpointslice"
+
 k -n smoke label pod web tier=fe >/dev/null
 expect "$(k -n smoke get pods -l tier=fe -o name)" "pod/web" "label selector"
 k -n smoke delete pod web >/dev/null
@@ -65,4 +81,7 @@ expect "$(k -n smoke get pods -o name)" "" "pod deleted"
 expect "$(printf '%s' '{"apiVersion":"authorization.k8s.io/v1","kind":"SelfSubjectAccessReview","spec":{"resourceAttributes":{"verb":"create","resource":"pods"}}}' \
   | k create --validate=false -f - -o jsonpath='{.status.allowed}')" "true" "self-subject access review"
 k get cm -A --field-selector metadata.namespace=kube-system >/dev/null
+# Namespace deletion completes (namespace controller, GC of the slice).
+k delete ns smoke --timeout=10s >/dev/null
+expect "$(k get ns smoke --ignore-not-found -o name)" "" "namespace deleted"
 echo "kubectl smoke: ok ($("$KUBECTL" version --client -o json | grep -m1 gitVersion | tr -d ' ",'))"

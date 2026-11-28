@@ -12,18 +12,29 @@
 //!   their history is gone;
 //! - paginated listers read one page per step while writes go on between
 //!   pages;
-//! - clusters are forked mid-run, and informers follow onto the fork.
+//! - clusters are forked mid-run, and informers follow onto the fork;
+//! - owners and dependents are created and deleted with every propagation
+//!   policy; pods and a Service come and go; the `team` namespace is
+//!   deleted and recreated;
+//! - the built-in controllers (`kubemu-controllers`, `kubemu-scheduler`)
+//!   are actors too, stepped one at a time between client requests.
 //!
 //! Invariants: no unexpected response codes, watch resourceVersions
 //! strictly increase, no lost events (every informer mirrors the cluster
 //! once caught up), and a paginated list equals the list at its
-//! resourceVersion.
+//! resourceVersion. Once clients stop and controllers settle (virtual time
+//! advancing to their requeues): nothing is left terminating, no
+//! dependent outlives all its owners (GC eventually consistent), every
+//! namespace has its default ServiceAccount, every pod is bound and
+//! Running, and Endpoints list exactly the ready pods.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::time::Duration;
 
+use kubemu_api::object;
 use kubemu_api::{Api, HttpRequest, Reply, WatchCursor};
+use kubemu_controllers::{Manager, stored};
 use kubemu_env::Rng;
 use kubemu_env_sim::SimEnv;
 use kubemu_faults::{Fault, FaultConfig, FaultSchedule};
@@ -32,6 +43,19 @@ use serde_json::{Value, json};
 pub const CLUSTERS: [&str; 3] = ["alpha", "beta", "gamma"];
 const NAMESPACES: [&str; 2] = ["default", "team"];
 const FINALIZER: &str = "sim.kubemu.dev/hold";
+
+/// A create may meet an existing name (409) or a namespace that is
+/// terminating (403) or gone (404).
+const CREATE_OK: &[u16] = &[201, 403, 404, 409];
+
+/// The controllers of `kubemu up`, for one cluster. A fork is a copy of
+/// its root cluster, nodes included, so its kubelet is the root's node.
+fn controllers(sim: &SimEnv, cluster: &str) -> Manager {
+    let root = cluster.split('.').next().unwrap_or(cluster);
+    let mut cs = kubemu_controllers::standard(&sim.env, root);
+    cs.push(Box::new(kubemu_scheduler::Scheduler::new(sim.env.clone())));
+    Manager::new(cs)
+}
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -261,8 +285,10 @@ pub fn run(seed: u64, cfg: &Config) -> Outcome {
     };
     let mut informers: BTreeMap<String, Informer> = BTreeMap::new();
     let mut pagers: BTreeMap<String, Pager> = BTreeMap::new();
+    let mut managers: BTreeMap<String, Manager> = BTreeMap::new();
     for c in CLUSTERS {
         sim.api.add_cluster(c);
+        managers.insert(c.to_owned(), controllers(&simenv, c));
         sim.call(
             c,
             HttpRequest::new("POST", "/api/v1/namespaces")
@@ -286,18 +312,14 @@ pub fn run(seed: u64, cfg: &Config) -> Outcome {
         let path = format!("{}/{name}", cms(ns));
         let faults_before = faults.injected().len();
 
-        let what = match rng.below(24) {
+        let what = match rng.below(34) {
             0..=4 => {
                 let mut body =
                     json!({"metadata": {"name": name}, "data": {"v": rng.next_u64().to_string()}});
                 if rng.chance(0.3) {
                     body["metadata"]["finalizers"] = json!([FINALIZER]);
                 }
-                let (s, _) = sim.call(
-                    c,
-                    HttpRequest::new("POST", &cms(ns)).json(&body),
-                    &[201, 409],
-                );
+                let (s, _) = sim.call(c, HttpRequest::new("POST", &cms(ns)).json(&body), CREATE_OK);
                 format!("create {ns}/{name} -> {s}")
             }
             5..=7 => {
@@ -366,6 +388,7 @@ pub fn run(seed: u64, cfg: &Config) -> Outcome {
                     relists: 0,
                 };
                 informers.insert(to.clone(), i);
+                managers.insert(to.clone(), controllers(&simenv, &to));
                 format!("fork -> {to}")
             }
             16..=17 => match pagers.remove(c) {
@@ -433,6 +456,79 @@ pub fn run(seed: u64, cfg: &Config) -> Outcome {
                     format!("pager page -> {s}")
                 }
             },
+            24..=25 => {
+                // A dependent of an existing configmap.
+                let (s, owner) = sim.call(c, HttpRequest::new("GET", &path), &[200, 404]);
+                if s == 200 {
+                    let dep = format!("dep-{}", rng.below(cfg.keys_per_namespace));
+                    let body = json!({"metadata": {"name": dep, "ownerReferences": [{
+                        "apiVersion": "v1", "kind": "ConfigMap",
+                        "name": object::name(&owner), "uid": object::uid(&owner),
+                    }]}});
+                    let (s, _) =
+                        sim.call(c, HttpRequest::new("POST", &cms(ns)).json(&body), CREATE_OK);
+                    format!("dependent {ns}/{dep} of {name} -> {s}")
+                } else {
+                    format!("dependent of {ns}/{name} -> no owner")
+                }
+            }
+            26 => {
+                let policy = sim.pick(&["Background", "Foreground", "Orphan"]);
+                let req =
+                    HttpRequest::new("DELETE", &path).json(&json!({"propagationPolicy": policy}));
+                let (s, _) = sim.call(c, req, &[200, 404]);
+                format!("delete {ns}/{name} {policy} -> {s}")
+            }
+            27 => {
+                let pod = format!("pod-{}", rng.below(4));
+                let p = format!("/api/v1/namespaces/{ns}/pods");
+                if rng.chance(0.6) {
+                    let app = sim.pick(&["web", "db"]);
+                    let body = json!({"metadata": {"name": pod, "labels": {"app": app}}, "spec": {"containers": [
+                        {"name": "c", "image": "app:1", "ports": [{"name": "http", "containerPort": 8080}]}
+                    ]}});
+                    let (s, _) = sim.call(c, HttpRequest::new("POST", &p).json(&body), CREATE_OK);
+                    format!("create pod {ns}/{pod} -> {s}")
+                } else {
+                    let (s, _) = sim.call(
+                        c,
+                        HttpRequest::new("DELETE", &format!("{p}/{pod}")),
+                        &[200, 404],
+                    );
+                    format!("delete pod {ns}/{pod} -> {s}")
+                }
+            }
+            28 => {
+                let p = format!("/api/v1/namespaces/{ns}/services");
+                let body = json!({"metadata": {"name": "web"}, "spec": {"selector": {"app": "web"},
+                    "ports": [{"port": 80, "targetPort": "http", "protocol": "TCP"}]}});
+                let (s, _) = sim.call(c, HttpRequest::new("POST", &p).json(&body), CREATE_OK);
+                format!("create service {ns}/web -> {s}")
+            }
+            29 => {
+                if rng.chance(0.3) {
+                    let (s, _) = sim.call(
+                        c,
+                        HttpRequest::new("DELETE", "/api/v1/namespaces/team"),
+                        &[200, 404],
+                    );
+                    format!("delete namespace team -> {s}")
+                } else {
+                    let body = json!({"metadata": {"name": "team"}});
+                    let (s, _) = sim.call(
+                        c,
+                        HttpRequest::new("POST", "/api/v1/namespaces").json(&body),
+                        &[201, 409],
+                    );
+                    format!("create namespace team -> {s}")
+                }
+            }
+            30..=33 => {
+                let m = managers.get_mut(c).expect("manager exists");
+                let i = rng.below(m.len() as u64) as usize;
+                let r = m.step_one(i, &mut sim.api, c);
+                format!("controller {} -> {} requests", m.name(i), r.requests)
+            }
             _ => {
                 let i = informers.get_mut(c).expect("informer exists");
                 let mut i = std::mem::take(i);
@@ -451,9 +547,26 @@ pub fn run(seed: u64, cfg: &Config) -> Outcome {
         let _ = writeln!(sim.trace, "{step} {c} {what}");
     }
 
+    // Clients stop: release our finalizers, let controllers settle, with
+    // virtual time jumping to their requeues, then check the end state.
+    let names: Vec<String> = informers.keys().cloned().collect();
+    for c in &names {
+        release_holds(&mut sim, c);
+        let m = managers.get_mut(c).expect("manager exists");
+        for _ in 0..50 {
+            let n = m.settle(&mut sim.api, c, 50);
+            let now = simenv.env.clock.now();
+            match m.next_wake() {
+                Some(t) if t > now => simenv.clock.advance(t.saturating_since(now)),
+                _ if n == 0 => break,
+                _ => {}
+            }
+        }
+        check_settled(&mut sim, c);
+    }
+
     // Invariant: after catching up without faults, every informer mirrors
     // its cluster exactly.
-    let names: Vec<String> = informers.keys().cloned().collect();
     let mut relists = 0;
     for c in &names {
         let mut i = informers.remove(c).expect("listed");
@@ -490,6 +603,99 @@ pub fn run(seed: u64, cfg: &Config) -> Outcome {
         forks,
         relists,
         violations: sim.violations,
+    }
+}
+
+/// Removes the sim's finalizer from every object: whoever owned it is
+/// done, so nothing it held can stay stuck.
+fn release_holds(sim: &mut Sim<'_>, c: &str) {
+    let (_, l) = sim.call(c, HttpRequest::new("GET", CMS), &[200]);
+    for item in l["items"].as_array().cloned().unwrap_or_default() {
+        if !object::finalizers(&item).iter().any(|f| f == FINALIZER) {
+            continue;
+        }
+        let mut obj = item.clone();
+        obj["kind"] = json!("ConfigMap");
+        obj["apiVersion"] = json!("v1");
+        let fins: Vec<String> = object::finalizers(&item)
+            .into_iter()
+            .filter(|f| f != FINALIZER)
+            .collect();
+        obj["metadata"]["finalizers"] = json!(fins);
+        let p = format!("{}/{}", cms(object::namespace(&item)), object::name(&item));
+        sim.call(c, HttpRequest::new("PUT", &p).json(&obj), &[200]);
+    }
+}
+
+/// End-state invariants once controllers have settled.
+fn check_settled(sim: &mut Sim<'_>, c: &str) {
+    let mut all: Vec<(&str, Value)> = Vec::new();
+    for r in stored() {
+        let p = object::path(r, "", None, None);
+        let (_, l) = sim.call(c, HttpRequest::new("GET", &p), &[200]);
+        for item in l["items"].as_array().cloned().unwrap_or_default() {
+            all.push((r.plural, item));
+        }
+    }
+    let uids: Vec<&str> = all.iter().filter_map(|(_, v)| object::uid(v)).collect();
+    let mut bad = Vec::new();
+    for (plural, v) in &all {
+        let what = format!("{plural} {}/{}", object::namespace(v), object::name(v));
+        if object::is_deleting(v) {
+            bad.push(format!(
+                "{what} still terminating ({:?})",
+                object::finalizers(v)
+            ));
+        }
+        let refs = object::owner_refs(v);
+        if !refs.is_empty()
+            && !refs
+                .iter()
+                .any(|r| uids.contains(&r["uid"].as_str().unwrap_or("")))
+        {
+            bad.push(format!("{what} outlived all its owners"));
+        }
+        if *plural == "pods"
+            && (v["spec"]["nodeName"].is_null() || v["status"]["phase"] != "Running")
+        {
+            bad.push(format!("{what} not running: {}", v["status"]));
+        }
+    }
+    fn of<'a>(all: &'a [(&str, Value)], plural: &'a str) -> impl Iterator<Item = &'a Value> + 'a {
+        all.iter()
+            .filter(move |(p, _)| *p == plural)
+            .map(|(_, v)| v)
+    }
+    for ns in of(&all, "namespaces") {
+        let n = object::name(ns);
+        if !of(&all, "serviceaccounts")
+            .any(|sa| object::namespace(sa) == n && object::name(sa) == "default")
+        {
+            bad.push(format!("namespace {n} has no default ServiceAccount"));
+        }
+    }
+    for svc in of(&all, "services") {
+        let ns = object::namespace(svc);
+        let mut want: Vec<&str> = of(&all, "pods")
+            .filter(|p| object::namespace(p) == ns && p["metadata"]["labels"]["app"] == "web")
+            .filter_map(|p| p["status"]["podIP"].as_str())
+            .collect();
+        want.sort_unstable();
+        let ep = of(&all, "endpoints")
+            .find(|e| object::namespace(e) == ns && object::name(e) == object::name(svc));
+        let mut have: Vec<&str> = ep
+            .and_then(|e| e["subsets"][0]["addresses"].as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|a| a["ip"].as_str())
+            .collect();
+        have.sort_unstable();
+        if ep.is_none() || have != want {
+            bad.push(format!("endpoints {ns}/web are {have:?}, want {want:?}"));
+        }
+    }
+    for b in bad {
+        sim.violations.push(format!("{c} settled: {b}"));
     }
 }
 

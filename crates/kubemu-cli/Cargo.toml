@@ -17,5 +17,7 @@ path = "src/main.rs"
 [dependencies]
 kubemu-api.workspace = true
 kubemu-apiserver.workspace = true
+kubemu-controllers.workspace = true
+kubemu-scheduler.workspace = true
 kubemu-env-real.workspace = true
 tokio.workspace = true

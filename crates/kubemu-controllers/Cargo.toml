@@ -1,6 +1,6 @@
 [package]
 name = "kubemu-controllers"
-description = "Workload, EndpointSlice, GC, namespace and ServiceAccount controllers"
+description = "Built-in controllers as reconcile -> actions state machines (ADR 0001)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,3 +9,13 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+kubemu-api.workspace = true
+kubemu-api-types.workspace = true
+kubemu-env.workspace = true
+kubemu-store.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+kubemu-env-sim.workspace = true

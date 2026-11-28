@@ -300,6 +300,7 @@ mod tests {
             pods.subresource("status").unwrap().verbs,
             ["get", "patch", "update"]
         );
+        assert_eq!(pods.subresource("binding").unwrap().verbs, ["create"]);
         assert!(pods.subresource("exec").is_none());
 
         let ns = resource("", "v1", "namespaces").unwrap();

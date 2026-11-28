@@ -525,6 +525,30 @@ fn namespace_lifecycle() {
         200,
         "the namespace controller finishes it"
     );
+    // What the namespace controller does once the content is gone.
+    t.delete("/api/v1/namespaces/team/configmaps/a");
+    let (_, mut ns) = t.get("/api/v1/namespaces/team");
+    ns["spec"]["finalizers"] = json!([]);
+    ns["metadata"]["labels"] = json!({"ignored": "by /finalize"});
+    assert_eq!(t.put("/api/v1/namespaces/team/finalize", ns).0, 200);
+    assert_eq!(t.get("/api/v1/namespaces/team").0, 404);
+}
+
+#[test]
+fn binding_assigns_a_node_once() {
+    let mut t = T::new();
+    let pods = "/api/v1/namespaces/default/pods";
+    t.post(
+        pods,
+        json!({"metadata": {"name": "p"}, "spec": {"containers": [{"name": "c", "image": "i"}]}}),
+    );
+    let b = json!({"apiVersion": "v1", "kind": "Binding", "metadata": {"name": "p"}, "target": {"kind": "Node", "name": "n1"}});
+    assert_eq!(t.post(&format!("{pods}/p/binding"), b.clone()).0, 201);
+    let (_, p) = t.get(&format!("{pods}/p"));
+    assert_eq!(p["spec"]["nodeName"], "n1");
+    assert_eq!(p["status"]["conditions"][0]["type"], "PodScheduled");
+    assert_eq!(t.post(&format!("{pods}/p/binding"), b).0, 409);
+    assert_eq!(t.post(&format!("{CMS}/x/binding"), json!({})).0, 404);
 }
 
 #[test]

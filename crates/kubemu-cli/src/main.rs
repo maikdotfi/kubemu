@@ -83,6 +83,9 @@ fn parse_opts(args: &[String], allow_up: bool) -> Result<Opts, String> {
 /// `kubemu up`: one cluster, served until Ctrl-C.
 fn up(o: Opts) -> ExitCode {
     let (env, seed) = kubemu_env_real::real_env(o.seed);
+    let mut controllers = kubemu_controllers::standard(&env, &o.cluster);
+    controllers.push(Box::new(kubemu_scheduler::Scheduler::new(env.clone())));
+    let manager = kubemu_controllers::Manager::new(controllers);
     let mut api = kubemu_api::Api::new(env);
     api.add_cluster(&o.cluster);
     let listener = match kubemu_env_real::net::bind_tcp(&format!("{}:{}", o.host, o.port)) {
@@ -112,7 +115,8 @@ fn up(o: Opts) -> ExitCode {
         "kubemu: WARNING: plain HTTP and no authentication; every client is cluster-admin (ADR 0011)"
     );
     eprintln!(
-        "kubemu: WARNING: no controllers yet (M1 in progress): nothing reconciles, pods are never scheduled"
+        "kubemu: WARNING: pods are simulated (SimKubelet on node {}-node): they turn Running and Ready but no containers run (real workloads arrive in M2)",
+        o.cluster
     );
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -125,6 +129,7 @@ fn up(o: Opts) -> ExitCode {
         }
     };
     let shared = kubemu_apiserver::Shared::new(api, o.cluster);
+    rt.spawn(kubemu_apiserver::run_controllers(shared.clone(), manager));
     let result = rt.block_on(kubemu_apiserver::serve(listener, shared, async {
         let _ = tokio::signal::ctrl_c().await;
         eprintln!("kubemu: shutting down");

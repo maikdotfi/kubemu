@@ -81,10 +81,34 @@ pub fn prepare_for_create(r: &ResourceInfo, obj: &mut Value) {
     }
 }
 
+/// Whether nothing holds a deleting object back any more: no finalizers,
+/// and for namespaces no `spec.finalizers` either.
+pub fn finalized(r: &ResourceInfo, obj: &Value) -> bool {
+    crate::object::finalizers(obj).is_empty()
+        && !(is(r, "", "namespaces")
+            && obj["spec"]["finalizers"]
+                .as_array()
+                .is_some_and(|f| !f.is_empty()))
+}
+
 /// `PrepareForUpdate`: `new` becomes what is stored. The main resource
-/// cannot change status; `/status` changes nothing but status.
-pub fn prepare_for_update(r: &ResourceInfo, new: &mut Value, old: &Value, status: bool) {
-    if status {
+/// cannot change status; `/status` changes nothing but status; a
+/// namespace's `/finalize` changes nothing but `spec.finalizers`.
+pub fn prepare_for_update(r: &ResourceInfo, new: &mut Value, old: &Value, sub: Option<&str>) {
+    if sub == Some("finalize") {
+        let f = new["spec"].get("finalizers").cloned();
+        *new = old.clone();
+        match f {
+            Some(f) => new["spec"]["finalizers"] = f,
+            None => {
+                if let Some(s) = new["spec"].as_object_mut() {
+                    s.remove("finalizers");
+                }
+            }
+        }
+        return;
+    }
+    if sub == Some("status") {
         let s = new.get("status").cloned();
         *new = old.clone();
         match s {

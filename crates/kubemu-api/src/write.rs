@@ -188,8 +188,68 @@ impl Api {
         }
     }
 
+    /// `POST pods/<name>/binding`: how a scheduler assigns a node.
+    fn bind(&mut self, ctx: &Ctx<'_>, req: &HttpRequest) -> ApiResult<HttpResponse> {
+        let b = parse_json(&req.body)?;
+        let name = ctx.name.clone().unwrap_or_default();
+        let node = b["target"]["name"].as_str().unwrap_or("").to_owned();
+        if node.is_empty() {
+            return Err(ApiError::invalid(
+                "Binding",
+                "",
+                &name,
+                vec![meta::required("target.name", "")],
+            ));
+        }
+        let k = key(ctx.r, ctx.ns(), &name);
+        let old = self
+            .cluster(ctx.cluster)?
+            .get(&k)
+            .map(|o| o.value.clone())
+            .ok_or_else(|| ApiError::not_found(ctx.subject(&name)))?;
+        if let Some(n) = old["spec"]["nodeName"].as_str().filter(|n| !n.is_empty()) {
+            return Err(ApiError::conflict(
+                ctx.subject(&name),
+                &format!("pod {name} is already assigned to node {n:?}"),
+            ));
+        }
+        if o::is_deleting(&old) {
+            return Err(ApiError::conflict(
+                ctx.subject(&name),
+                "pod is being deleted",
+            ));
+        }
+        let mut obj = (*old).clone();
+        obj["spec"]["nodeName"] = json!(node);
+        let mut conds: Vec<Value> = obj["status"]["conditions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|c| c["type"] != "PodScheduled")
+            .collect();
+        conds.push(json!({
+            "type": "PodScheduled",
+            "status": "True",
+            "lastProbeTime": null,
+            "lastTransitionTime": meta::now_rfc3339(&self.env),
+        }));
+        obj["status"]["conditions"] = json!(conds);
+        if !ctx.dry_run()? {
+            let expected = o::resource_version(&old).and_then(|s| s.parse().ok());
+            self.put(ctx, k, obj, expected, false)?;
+        }
+        Ok(HttpResponse::json(
+            201,
+            json!({"kind": "Status", "apiVersion": "v1", "metadata": {}, "status": "Success", "code": 201}),
+        ))
+    }
+
     pub(crate) fn create(&mut self, ctx: &Ctx<'_>, req: &HttpRequest) -> ApiResult<HttpResponse> {
         check_body_type(req)?;
+        if ctx.subresource.as_deref() == Some("binding") {
+            return self.bind(ctx, req);
+        }
         let (obj, warnings) = self.decode_object(ctx, parse_json(&req.body)?)?;
         if ctx.r.group == "authorization.k8s.io" {
             return Ok(with_warnings(
@@ -299,10 +359,10 @@ impl Api {
             }
         }
         self.set_namespace(ctx, &mut obj)?;
-        let status_update = ctx.subresource.as_deref() == Some("status");
+        let sub = ctx.subresource.as_deref();
         let k = key(r, ctx.ns(), &url_name);
         let Some(old) = self.cluster(ctx.cluster)?.get(&k).map(|o| o.value.clone()) else {
-            if strategy::allow_create_on_update(r) && !status_update && patched_from.is_none() {
+            if strategy::allow_create_on_update(r) && sub.is_none() && patched_from.is_none() {
                 o::meta_mut(&mut obj).remove("resourceVersion");
                 return self.create_value(ctx, obj, warnings);
             }
@@ -341,7 +401,7 @@ impl Api {
             }
             m.insert("resourceVersion".into(), json!(old_rv));
         }
-        strategy::prepare_for_update(r, &mut obj, &old, status_update);
+        strategy::prepare_for_update(r, &mut obj, &old, sub);
         if o::is_deleting(&old) {
             let had = o::finalizers(&old);
             if o::finalizers(&obj).iter().any(|f| !had.contains(f)) {
@@ -491,13 +551,17 @@ impl Api {
         {
             fins.push(f.to_owned());
         }
-        let grace = if r.group.is_empty() && r.plural == "pods" {
+        let is_pod = r.group.is_empty() && r.plural == "pods";
+        let forced = is_pod && opts.grace_period == Some(0);
+        let grace = if is_pod {
             strategy::pod_grace_period(&obj, opts.grace_period)
         } else {
             None
         };
         // Namespaces always go through the namespace controller.
-        let pending = is_ns || !fins.is_empty() || grace.is_some();
+        // Namespaces wait for the namespace controller (spec.finalizers).
+        let ns_held = is_ns && !strategy::finalized(r, &json!({"spec": obj["spec"]}));
+        let pending = ns_held || !fins.is_empty() || grace.is_some();
         let dry = ctx.dry_run()?;
         if !pending {
             if !dry {
@@ -524,8 +588,9 @@ impl Api {
                     json!(meta::rfc3339(now_secs + g as u64)),
                 );
                 m.insert("deletionGracePeriodSeconds".into(), json!(g));
-            } else if let Some(g) = grace {
-                // A shorter grace period moves the deadline in.
+            } else if let Some(g) = grace.or(forced.then_some(0)) {
+                // A shorter grace period moves the deadline in; a forced
+                // (grace 0) delete means the kubelet is done.
                 let cur = m
                     .get("deletionGracePeriodSeconds")
                     .and_then(Value::as_i64)

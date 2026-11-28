@@ -1,6 +1,6 @@
 [package]
 name = "kubemu-scheduler"
-description = "Trivial pod placement: selectors, basic affinity and taints, no capacity"
+description = "Trivial placement: node selectors, taints, no capacity (README §2.2)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,3 +9,12 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+kubemu-api.workspace = true
+kubemu-controllers.workspace = true
+kubemu-env.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+kubemu-env-sim.workspace = true

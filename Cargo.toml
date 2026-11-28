@@ -15,12 +15,14 @@ publish = false
 # Add internal crates here as they gain a dependent.
 kubemu-api = { path = "crates/kubemu-api" }
 kubemu-api-types = { path = "crates/kubemu-api-types" }
+kubemu-controllers = { path = "crates/kubemu-controllers" }
 kubemu-env = { path = "crates/kubemu-env" }
 kubemu-env-sim = { path = "crates/kubemu-env-sim" }
 kubemu-env-real = { path = "crates/kubemu-env-real" }
 kubemu-apiserver = { path = "crates/kubemu-apiserver" }
 kubemu-faults = { path = "crates/kubemu-faults" }
 kubemu-patch = { path = "crates/kubemu-patch" }
+kubemu-scheduler = { path = "crates/kubemu-scheduler" }
 kubemu-store = { path = "crates/kubemu-store" }
 
 # External. Pinned in Cargo.lock; add here only when code uses them.

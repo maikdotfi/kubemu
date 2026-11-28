@@ -22,7 +22,7 @@ mod decode;
 mod discovery;
 mod http;
 mod meta;
-mod object;
+pub mod object;
 mod read;
 mod selector;
 mod status;
@@ -265,6 +265,7 @@ impl Api {
             ("GET", None) if ctx.query.bool("watch")? => "watch",
             ("GET", None) => "list",
             ("POST", None) => "create",
+            ("POST", Some(_)) if ctx.subresource.is_some() => "create",
             ("PUT", Some(_)) => "update",
             ("PATCH", Some(_)) => "patch",
             ("DELETE", Some(_)) => "delete",
