@@ -1,6 +1,6 @@
 # 0010: Object model and wire format
 
-- Status: Accepted (signed off by the project owner, 2026-11-27)
+- Status: Accepted (signed off by the project owner, 2026-11-27); wire format amended by [0014](0014-protobuf-request-bodies.md)
 - Date: 2026-11-27
 
 ## Context

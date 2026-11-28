@@ -358,10 +358,11 @@ ADRs live in [`docs/adr/`](docs/adr/). **Every ADR that M0 and M1 need is accept
 | [0007](docs/adr/0007-k8s-version-policy.md) | Kubernetes version policy: single target minor, **1.37** | **Accepted** | M0 |
 | [0008](docs/adr/0008-ci-forge.md) | CI forge: GitHub Actions; hosted runners now, self-hosted later | **Accepted** | M0 |
 | [0009](docs/adr/0009-license-and-naming.md) | License and naming (check that "kubemu" is free on crates.io and GitHub) | Proposed, not written | M6 |
-| [0010](docs/adr/0010-object-model-and-wire-format.md) | Object model: JSON values in the store, JSON-only wire format | **Accepted**; its open check failed (typed clients send protobuf), revisit pending owner sign-off | M1 |
+| [0010](docs/adr/0010-object-model-and-wire-format.md) | Object model: JSON values in the store, JSON-only wire format | **Accepted**; wire format amended by 0014 | M1 |
 | [0011](docs/adr/0011-api-server-shell.md) | API server: synchronous `kubemu-api` frontend + thin tokio HTTP shell (Turso-style), plain HTTP, multi-cluster deferred | **Accepted** | M1 |
 | [0012](docs/adr/0012-schema-source.md) | Schemas, discovery and OpenAPI from vendored upstream `api/openapi-spec` | **Accepted** | M1 |
 | [0013](docs/adr/0013-validation-and-defaulting.md) | Validation and defaulting: port only what users observe, oracle-checked | **Accepted** | M1 |
+| [0014](docs/adr/0014-protobuf-request-bodies.md) | Protobuf request bodies for built-in types, decoded to JSON via a Go-generated wire table; `/openapi/v2` as protobuf | **Accepted** | M1 |
 
 ---
 
