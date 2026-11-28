@@ -1,6 +1,6 @@
 ---
 name: adr
-description: Identify architecture decisions at task kickoff, draft ADRs, and request human sign-off.
+description: Load at task kickoff to identify architecture decisions, draft ADRs, and request human sign-off.
 ---
 
 - At task kickoff, identify decisions that need an ADR. If there are none, proceed.
