@@ -10,7 +10,7 @@ use std::process::{Child, ChildStdin, ChildStdout};
 
 mod validation;
 
-pub use validation::{default_case, quantity_case, strategy_case};
+pub use validation::{default_case, quantity_case, strategy_case, validate_case};
 
 use kubemu_api_types::{RESOURCES, Schema, Ty};
 use kubemu_env::Xoshiro256StarStar;

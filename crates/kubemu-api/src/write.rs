@@ -10,7 +10,7 @@ use serde_json::{Map, Value, json};
 
 use crate::decode::{FieldValidation, decode};
 use crate::http::{HttpRequest, HttpResponse, body_type};
-use crate::meta::{self, name_rule};
+use crate::meta;
 use crate::object::{self as o, key, meta_mut};
 use crate::read::Filter;
 use crate::status::{self, ApiError, ApiResult, Cause};
@@ -131,24 +131,13 @@ impl Api {
         }
     }
 
-    /// Metadata rules every resource shares (ADR 0013).
+    /// Metadata and per-kind validation (ADR 0013).
     fn validate(&self, r: &ResourceInfo, obj: &Value) -> ApiResult<()> {
-        let mut causes: Vec<Cause> = Vec::new();
-        let name = o::name(obj);
-        meta::validate_name(name, name_rule(r.group, r.plural), &mut causes);
-        if r.namespaced {
-            meta::validate_namespace_name(o::namespace(obj), &mut causes);
-        }
-        if let Some(Value::Object(l)) = o::meta(obj).and_then(|m| m.get("labels")) {
-            meta::validate_labels(l, "metadata.labels", &mut causes);
-        }
-        if let Some(Value::Object(a)) = o::meta(obj).and_then(|m| m.get("annotations")) {
-            meta::validate_annotations(a, &mut causes);
-        }
+        let causes = kubemu_validation::validate(r, obj);
         if causes.is_empty() {
             Ok(())
         } else {
-            Err(ApiError::invalid(r.kind, r.group, name, causes))
+            Err(ApiError::invalid(r.kind, r.group, o::name(obj), causes))
         }
     }
 

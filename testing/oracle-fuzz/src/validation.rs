@@ -346,3 +346,305 @@ pub fn strategy_case(oracle: &mut Oracle, seed: u64) -> CaseResult {
         ))
     })
 }
+
+/// A pick that is usually the first (valid) choice.
+fn mostly<'a, T>(g: &mut Gen, items: &'a [T]) -> &'a T {
+    if g.chance(3, 4) {
+        &items[0]
+    } else {
+        g.pick(items)
+    }
+}
+
+const QUANTITIES: &[&str] = &["100m", "1", "2", "500Mi", "1Gi", "-1"];
+
+fn resources(g: &mut Gen) -> Value {
+    let mut r = Map::new();
+    for list in ["limits", "requests"] {
+        if g.chance(1, 2) {
+            let mut m = Map::new();
+            for k in ["cpu", "memory"] {
+                if g.chance(1, 2) {
+                    m.insert(k.into(), json!(*mostly(g, QUANTITIES)));
+                }
+            }
+            if !m.is_empty() {
+                r.insert(list.into(), Value::Object(m));
+            }
+        }
+    }
+    Value::Object(r)
+}
+
+/// A pod that is valid unless the dice say otherwise, touching only
+/// ported rules (`kubemu_validation::validation`).
+fn pod(g: &mut Gen) -> Value {
+    let mut volumes = Vec::new();
+    let mut vol_names = Vec::new();
+    for _ in 0..g.below(3) {
+        let name = *mostly(g, &["data", "cache", "Bad_Name", "", "data"]);
+        let mut v = json!({"name": name});
+        match g.below(8) {
+            0 => v["configMap"] = json!({"name": "cm"}),
+            1 => v["secret"] = json!({"secretName": "s"}),
+            2 => {
+                v["emptyDir"] = json!({});
+                v["configMap"] = json!({"name": "cm"});
+            }
+            3 => {}
+            _ => v["emptyDir"] = json!({}),
+        }
+        vol_names.push(name);
+        volumes.push(v);
+    }
+    let mut containers = Vec::new();
+    let n = if g.chance(1, 20) { 0 } else { 1 + g.below(3) };
+    for i in 0..n {
+        let mut c = Map::new();
+        let names: &[&str] = if i == 0 {
+            &["app", "", "App", "a_b"]
+        } else {
+            &["sidecar", "app", "", "x-1"]
+        };
+        c.insert("name".into(), json!(*mostly(g, names)));
+        let image = *mostly(g, &["nginx", "", "busybox:1.36"]);
+        if !image.is_empty() || g.chance(1, 2) {
+            c.insert("image".into(), json!(image));
+        }
+        if g.chance(1, 6) {
+            c.insert(
+                "imagePullPolicy".into(),
+                json!(*g.pick(&["Never", "Sometimes", "Always"])),
+            );
+        }
+        if g.chance(1, 10) {
+            c.insert(
+                "terminationMessagePolicy".into(),
+                json!(*g.pick(&["FallbackToLogsOnError", "Bogus"])),
+            );
+        }
+        let mut ports = Vec::new();
+        for j in 0..g.below(3) {
+            let mut p = Map::new();
+            p.insert(
+                "containerPort".into(),
+                json!(*mostly(g, &[80 + j as i64, 0, 70000, -1])),
+            );
+            if i == 0 && j == 0 && g.chance(1, 5) {
+                p.insert("hostPort".into(), json!(*g.pick(&[8080, 99999])));
+            }
+            if g.chance(1, 3) {
+                p.insert(
+                    "name".into(),
+                    json!(*mostly(
+                        g,
+                        &[
+                            "http",
+                            "HTTP",
+                            "a--b",
+                            "-x",
+                            "toolongportname1",
+                            "8080",
+                            "web"
+                        ]
+                    )),
+                );
+            }
+            if g.chance(1, 5) {
+                p.insert("protocol".into(), json!(*g.pick(&["UDP", "SCTP", "HTTP"])));
+            }
+            ports.push(Value::Object(p));
+        }
+        if !ports.is_empty() {
+            c.insert("ports".into(), Value::Array(ports));
+        }
+        let env: Vec<Value> = (0..g.below(3))
+            .map(|_| json!({"name": *mostly(g, &["FOO", "", "A=B", "ok.name-1", "é"]), "value": "v"}))
+            .collect();
+        if !env.is_empty() {
+            c.insert("env".into(), Value::Array(env));
+        }
+        let mut mounts = Vec::new();
+        for _ in 0..g.below(3) {
+            let name = if !vol_names.is_empty() && g.chance(3, 4) {
+                *g.pick(&vol_names)
+            } else {
+                *g.pick(&["missing", ""])
+            };
+            mounts.push(json!({"name": name, "mountPath": *mostly(g, &["/data", "", "/cache"])}));
+        }
+        if !mounts.is_empty() {
+            c.insert("volumeMounts".into(), Value::Array(mounts));
+        }
+        if g.chance(1, 2) {
+            c.insert("resources".into(), resources(g));
+        }
+        containers.push(Value::Object(c));
+    }
+    let mut spec = json!({"containers": containers});
+    if !volumes.is_empty() {
+        spec["volumes"] = Value::Array(volumes);
+    }
+    if g.chance(1, 6) {
+        spec["restartPolicy"] = json!(*g.pick(&["Never", "OnFailure", "Sometimes"]));
+    }
+    if g.chance(1, 6) {
+        spec["dnsPolicy"] = json!(*g.pick(&["Default", "ClusterFirstWithHostNet", "Bogus"]));
+    }
+    if g.chance(1, 8) {
+        spec["nodeSelector"] = json!({*g.pick(&["disk", "bad key!", "example.com/zone"]): "ssd"});
+    }
+    if g.chance(1, 8) {
+        spec[*g.pick(&["hostname", "subdomain"])] = json!(*g.pick(&["web", "Web_1"]));
+    }
+    json!({
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": *mostly(g, &["web", "P", "a_b"]), "namespace": "default",
+                     "labels": {*mostly(g, &["app", "bad key!"]): "x"}},
+        "spec": spec,
+    })
+}
+
+/// A service, valid unless the dice say otherwise (ported rules only).
+fn service(g: &mut Gen) -> Value {
+    let mut spec = Map::new();
+    let ty = *mostly(
+        g,
+        &[
+            "",
+            "NodePort",
+            "LoadBalancer",
+            "ExternalName",
+            "ClusterIP",
+            "Bogus",
+        ],
+    );
+    if !ty.is_empty() {
+        spec.insert("type".into(), json!(ty));
+    }
+    if ty == "ExternalName" {
+        spec.insert(
+            "externalName".into(),
+            json!(*mostly(
+                g,
+                &["db.example.com", "", "Bad_Name", "db.example.com."]
+            )),
+        );
+    }
+    let mut ports = Vec::new();
+    let n = if g.chance(1, 10) { 0 } else { 1 + g.below(3) };
+    for i in 0..n {
+        let mut p = Map::new();
+        let name = *mostly(
+            g,
+            &[
+                ["http", "https", "metrics"][i as usize],
+                "",
+                "HTTP",
+                "http",
+                "a.b",
+            ],
+        );
+        if !name.is_empty() || g.chance(1, 2) {
+            p.insert("name".into(), json!(name));
+        }
+        p.insert("port".into(), json!(*mostly(g, &[80 + i as i64, 0, 70000])));
+        if g.chance(1, 5) {
+            p.insert("protocol".into(), json!(*g.pick(&["UDP", "HTTP"])));
+        }
+        if g.chance(1, 3) {
+            let tp = match g.below(7) {
+                0 => json!(8080),
+                1 => json!(0),
+                2 => json!(70000),
+                3 => json!("http"),
+                4 => json!("HTTP"),
+                5 => json!("--"),
+                _ => json!("toolongportname1"),
+            };
+            p.insert("targetPort".into(), tp);
+        }
+        if g.chance(1, 10) {
+            p.insert("nodePort".into(), json!(30080 + i as i64));
+        }
+        ports.push(Value::Object(p));
+    }
+    if !ports.is_empty() {
+        spec.insert("ports".into(), Value::Array(ports));
+    }
+    if g.chance(1, 2) {
+        spec.insert(
+            "selector".into(),
+            json!({*mostly(g, &["app", "bad key!"]): "x"}),
+        );
+    }
+    if g.chance(1, 5) {
+        spec.insert(
+            "sessionAffinity".into(),
+            json!(*g.pick(&["ClientIP", "Sticky", "None"])),
+        );
+    }
+    json!({
+        "apiVersion": "v1", "kind": "Service",
+        "metadata": {"name": *mostly(g, &["svc", "1svc", "Svc", "a.b"]), "namespace": "default"},
+        "spec": spec,
+    })
+}
+
+fn sorted_causes(v: &Value) -> Vec<(String, String, String)> {
+    let mut out: Vec<(String, String, String)> = v
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|c| {
+            let s = |k: &str| c[k].as_str().unwrap_or("").to_owned();
+            (s("reason"), s("field"), s("message"))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// One validation case: a pod or service through kubemu's defaulting and
+/// validation, and through the oracle's `rest.BeforeCreate`. Causes are
+/// compared as sets (Go iterates resource maps in random order),
+/// messages included: kubectl prints them.
+pub fn validate_case(oracle: &mut Oracle, seed: u64) -> CaseResult {
+    let mut g = Gen::new(seed);
+    let (obj, plural) = if g.chance(1, 2) {
+        (pod(&mut g), "pods")
+    } else {
+        (service(&mut g), "services")
+    };
+    let r = kubemu_api_types::resource("", "v1", plural).expect("served");
+    let theirs = match oracle.call("validate", json!({"object": obj}))? {
+        Ok(v) => sorted_causes(&v),
+        Err(e) => return Ok(Err(format!("validate: oracle error {e}\n  object: {obj}"))),
+    };
+    let mut defaulted = obj.clone();
+    kubemu_validation::default(r.group, r.kind, &mut defaulted);
+    let ours: Vec<(String, String, String)> = {
+        let mut v: Vec<_> = kubemu_validation::validate(r, &defaulted)
+            .into_iter()
+            .map(|c| (c.reason.to_owned(), c.field, c.message))
+            .collect();
+        v.sort();
+        v
+    };
+    Ok(if ours == theirs {
+        Ok(!ours.is_empty())
+    } else {
+        let only = |a: &[(String, String, String)], b: &[(String, String, String)]| {
+            a.iter()
+                .filter(|x| !b.contains(x))
+                .map(|x| format!("\n      {x:?}"))
+                .collect::<String>()
+        };
+        Err(format!(
+            "validate {} mismatch\n  object: {obj}\n  only kubemu:{}\n  only oracle:{}",
+            r.kind,
+            only(&ours, &theirs),
+            only(&theirs, &ours)
+        ))
+    })
+}

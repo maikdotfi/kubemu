@@ -440,6 +440,7 @@ dependencies = [
 name = "kubemu-validation"
 version = "0.0.0"
 dependencies = [
+ "kubemu-api-types",
  "num-bigint",
  "num-integer",
  "num-traits",

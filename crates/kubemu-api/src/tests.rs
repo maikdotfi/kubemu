@@ -757,3 +757,43 @@ fn strategies_match_upstream() {
     );
     assert_eq!(e["metadata"]["generation"], 3);
 }
+
+#[test]
+fn per_kind_validation() {
+    let mut t = T::new();
+    let (code, st) = t.post(
+        "/api/v1/namespaces/default/pods",
+        json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "p"},
+               "spec": {"containers": [{"name": "c", "ports": [{"containerPort": 70000}],
+                   "resources": {"limits": {"cpu": "1"}, "requests": {"cpu": "2"}}}]}}),
+    );
+    assert_eq!(code, 422, "{st}");
+    let fields: Vec<&str> = st["details"]["causes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["field"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        fields,
+        [
+            "spec.containers[0].image",
+            "spec.containers[0].ports[0].containerPort",
+            "spec.containers[0].resources.requests"
+        ]
+    );
+    assert!(
+        st["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Pod \"p\" is invalid: [")
+    );
+
+    // Service names are DNS-1123 labels (RelaxedServiceNameValidation).
+    let svc = |name: &str, ports: Value| json!({"apiVersion": "v1", "kind": "Service", "metadata": {"name": name}, "spec": {"ports": ports}});
+    let p = "/api/v1/namespaces/default/services";
+    assert_eq!(t.post(p, svc("1svc", json!([{"port": 80}]))).0, 201);
+    let (code, st) = t.post(p, svc("two", json!([{"port": 80}, {"port": 81}])));
+    assert_eq!(code, 422, "{st}");
+    assert_eq!(st["details"]["causes"][0]["field"], "spec.ports[0].name");
+}

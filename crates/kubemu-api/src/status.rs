@@ -25,14 +25,7 @@ pub struct Details {
     pub retry_after_seconds: Option<u32>,
 }
 
-/// One cause of an `Invalid` error: a field and what is wrong with it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Cause {
-    /// `FieldValueInvalid`, `FieldValueRequired`, ...
-    pub reason: &'static str,
-    pub message: String,
-    pub field: String,
-}
+pub use kubemu_validation::Cause;
 
 pub type ApiResult<T> = Result<T, ApiError>;
 

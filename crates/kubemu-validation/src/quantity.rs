@@ -10,7 +10,7 @@
 
 use num_bigint::BigInt;
 use num_integer::Integer;
-use num_traits::{Signed, ToPrimitive, Zero};
+use num_traits::{Signed, Zero};
 
 /// `resource.ErrFormatWrong`.
 pub const ERR_FORMAT_WRONG: &str =
@@ -392,12 +392,16 @@ impl Quantity {
         format!("{amount}{suffix}")
     }
 
-    /// The value in milli-units, saturating (for comparisons).
-    pub fn milli_value(&self) -> i64 {
-        let (r, _) = self.value.round_up(3);
-        let v = r.unscaled * pow10(3 - r.scale.min(3));
-        v.to_i64()
-            .unwrap_or(if v.is_negative() { i64::MIN } else { i64::MAX })
+    /// Compares values (`Quantity.Cmp`).
+    pub fn cmp_value(&self, other: &Self) -> std::cmp::Ordering {
+        let s = self.value.scale.max(other.value.scale);
+        let a = &self.value.unscaled * pow10(s - self.value.scale);
+        let b = &other.value.unscaled * pow10(s - other.value.scale);
+        a.cmp(&b)
+    }
+
+    pub fn is_negative(&self) -> bool {
+        self.value.unscaled.is_negative()
     }
 }
 
@@ -475,12 +479,5 @@ mod tests {
         assert_eq!(r("+512"), "+512");
         assert_eq!(r("100m"), "100m");
         assert_eq!(r("1500u"), "2m");
-    }
-
-    #[test]
-    fn milli_values() {
-        assert_eq!(Quantity::parse("1").unwrap().milli_value(), 1000);
-        assert_eq!(Quantity::parse("1500u").unwrap().milli_value(), 2);
-        assert_eq!(Quantity::parse("1Ki").unwrap().milli_value(), 1_024_000);
     }
 }
