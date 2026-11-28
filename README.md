@@ -2,7 +2,7 @@
 
 > **kubemu** (pronounced *kube emu*) is a single Rust binary that emulates enough of Kubernetes to deploy and test real workloads (app, database, ingress, operators) across multiple clusters, in CI or locally. It uses a fraction of the resources of kind/k3s, and seeded fault injection is a first-class feature.
 
-> **Status: M1 done (§12.1 steps 1–8).** Done: M0, plus vendored upstream OpenAPI (v1.37.3) with the generated resource table and schema arena (`kubemu-api-types`); JSON patch and strategic merge patch ported from the apiserver's Go code and differentially fuzzed against the Go oracle; the synchronous `kubemu-api` frontend (discovery, OpenAPI, CRUD/patch/watch with resourceVersion semantics, selectors, pagination, `/status`, `/binding`, `/finalize`, finalizers, namespace lifecycle); controllers (GC, namespace, ServiceAccount, Endpoints/EndpointSlice, a simulated kubelet and node) and a trivial scheduler, all under DST with end-state invariants; the HTTP shell plus `kubemu up`/`kubemu kubeconfig`, with a kubectl smoke test in CI; `kubemu-validation` (ADR 0013): quantities, every T0 defaulter, and pod/Service validation for common mistakes, all fuzzed against `k8s.io/kubernetes` itself; and `kubemu-proto` (ADR 0014): protobuf request bodies from typed clients decoded to JSON through a wire table generated from the Go types, fuzzed against Go's own protobuf round trip, so kubectl's typed commands (`create configmap|secret|namespace`, `auth can-i`) and `helm install|upgrade|uninstall --server-side=false` work (smoke-tested in CI); a client-go informer harness (`testing/informer-go`) and budget baselines (`testing/bench`: 4 MiB idle RSS, 4 ms to ready, forks under 1 µs). M2 step 1 (§12.3) is done: per-cluster pod and Service CIDRs (`--pod-cidr`, `--service-cidr`), Service cluster IPs allocated as upstream does (fuzzed against upstream's Service REST storage), the `kubernetes` Service, and pod IPs from the pod CIDR. **Next agent: M2 step 2, following §12.3; ADRs 0003–0005 are accepted (§14).**
+> **Status: M1 done (§12.1 steps 1–8).** Done: M0, plus vendored upstream OpenAPI (v1.37.3) with the generated resource table and schema arena (`kubemu-api-types`); JSON patch and strategic merge patch ported from the apiserver's Go code and differentially fuzzed against the Go oracle; the synchronous `kubemu-api` frontend (discovery, OpenAPI, CRUD/patch/watch with resourceVersion semantics, selectors, pagination, `/status`, `/binding`, `/finalize`, finalizers, namespace lifecycle); controllers (GC, namespace, ServiceAccount, Endpoints/EndpointSlice, a simulated kubelet and node) and a trivial scheduler, all under DST with end-state invariants; the HTTP shell plus `kubemu up`/`kubemu kubeconfig`, with a kubectl smoke test in CI; `kubemu-validation` (ADR 0013): quantities, every T0 defaulter, and pod/Service validation for common mistakes, all fuzzed against `k8s.io/kubernetes` itself; and `kubemu-proto` (ADR 0014): protobuf request bodies from typed clients decoded to JSON through a wire table generated from the Go types, fuzzed against Go's own protobuf round trip, so kubectl's typed commands (`create configmap|secret|namespace`, `auth can-i`) and `helm install|upgrade|uninstall --server-side=false` work (smoke-tested in CI); a client-go informer harness (`testing/informer-go`) and budget baselines (`testing/bench`: 4 MiB idle RSS, 4 ms to ready, forks under 1 µs). M2 step 1 (§12.3) is done: per-cluster pod and Service CIDRs (`--pod-cidr`, `--service-cidr`), Service cluster IPs allocated as upstream does (fuzzed against upstream's Service REST storage), the `kubernetes` Service, and pod IPs from the pod CIDR. **Next agent: M2 step 2, following §12.3; ADRs 0003–0005 are accepted (§14). Open review findings are in §12.4.**
 
 **Developing**
 ```sh
@@ -359,6 +359,34 @@ M2 follows ADRs [0003](docs/adr/0003-pod-networking.md) (netns+veth, per-cluster
 8. **Ingress (`kubemu-ingress`).** IngressClass, host and path routing, TLS from Secrets, one host port per cluster; stands aside for IngressClasses it doesn't own.
 9. **Dir-backed PVCs.** PVCs bound to per-cluster directories, access modes in metadata only (§8).
 10. **Exit criteria.** A reference chart (app + real Postgres + ingress) installs with Helm and serves traffic through the ingress in CI; `kubectl logs|exec|port-forward` in the smoke test; the §4.4 budgets measured for it in `testing/bench`.
+
+### 12.4 Review findings (2026-11-28, at M2 step 1)
+
+Open action items from a project review. Tick them off here as they land.
+
+**CI and test infrastructure**
+- [ ] **Flaky bench RSS gate.** `a1511a1` (docs only) failed with `idle_rss_mib` 5.160 against a baseline of 4.109, over the +25% `MAX_RSS_GROWTH`; the baseline is from another machine. Re-record it on `ubuntu-latest`, or gate RSS by budget only until self-hosted runners exist. Done when 10 runs in a row on `main` pass the bench job.
+- [ ] **Privileged CI job** (ADR 0004, ADR 0008 as amended), needed by steps 5–6. Done when a job creates and cleans up a netns and a veth pair.
+- [ ] **Nightly workflow** (§10, §11): long DST sweeps, long fuzz runs and long informer runs, with failing seeds filed as issues. No `schedule:` workflow exists yet.
+- [ ] **Regression seeds.** AGENTS.md says a failing DST seed becomes a regression test, but nothing stores or replays saved seeds. Add a seed list that `cargo test` replays.
+- [ ] **Trace differential against kind** (§10). Every compatibility check so far compares against Go libraries; nothing compares whole responses or watch streams with a real kube-apiserver. Start with the smoke-test request sequences.
+- [ ] **Reference chart in `testing/corpus/`** (app + Postgres + ingress) now, so each M2 step can be measured against the exit criteria.
+- [ ] **Property tests** exist only in `kubemu-store`. Add one for `kubemu_net::allocate` (never hands out an IP twice, never leaves the range) and use them for the step 2 controllers.
+- [ ] **`testing/README.md` is stale**: it calls the sim "store-only" and lists only merge, JSON patch and SMP for the oracle.
+
+**Networking, before step 6**
+- [ ] **Default CIDRs collide across processes.** `ClusterNetwork::default_for(n)` counts clusters per process, so every `kubemu up` on a host gives its first cluster `10.64.0.0/16` and `10.128.0.0/16`, and ADR 0003's bridges `kmu<N>` get the same names. Startup removal of leftover `kmu*` links could delete another running kubemu's bridges, for example in parallel CI jobs. Make bridge names and default CIDRs unique per host, and clean up only links this process owns. Done when a test runs two `kubemu up` at once.
+- [ ] **Forks share their parent's CIDRs** and IPs (`Api::fork_cluster`). Harmless without real networking; with bridges on the host (step 6, forks in M4) the same subnet sits on two bridges. Decide whether each cluster's bridge and proxy live in their own netns or forks re-address, as an ADR 0003 amendment.
+- [ ] **NodePorts are not allocated**, but step 6's proxy serves them. Allocate them like cluster IPs (derived from the objects, `service` fuzz op).
+
+**Core**
+- [ ] **One node owns the whole pod CIDR.** With a second node (DaemonSet tests in step 2), two `SimKubelet`s could pick the same IP in one round. Give each node its own `spec.podCIDR` slice, as upstream does.
+- [ ] **The `kubernetes` Service** is created only with the cluster; upstream recreates it when deleted.
+- [ ] **`hostNetwork` pods all get `NODE_IP`** (`172.18.0.2`), in every cluster.
+- [ ] **Known gaps users hit in M2 demos** (§12.2): `kubectl get` shows only NAME and AGE (no server-side Table output); pod updates skip spec immutability; no `kube-root-ca.crt` or `serviceaccounts/token`, which real pods expect.
+
+**Decisions**
+- [ ] ADR 0006 (Turso boundary) before M3; ADR 0009 (license and naming) before M6.
 
 ## 13. Risks and mitigations
 
