@@ -6,3 +6,5 @@
 # local kubemu state, traces and reports
 /.kubemu
 *.trace.json
+# Amp orb portal state
+.amp/portals/*

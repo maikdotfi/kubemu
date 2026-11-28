@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Amp orb setup: installs the pinned toolchains (rustup + mise) and warms the
+# cargo and Go caches. Runs on fresh and stale snapshots, so every step is
+# idempotent and cheap when its output is already present.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+step() {
+  local name=$1 start=$SECONDS
+  shift
+  echo "==> $name"
+  "$@"
+  echo "<== $name ($((SECONDS - start))s)"
+}
+
+export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$HOME/.local/share/mise/shims:$PATH"
+export MISE_YES=1
+
+install_rustup() {
+  command -v rustup >/dev/null && return
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+    sh -s -- -y --no-modify-path --profile minimal --default-toolchain none
+}
+
+install_rust_toolchain() {
+  # Installs the channel and components from rust-toolchain.toml.
+  rustup show active-toolchain >/dev/null 2>&1 || rustup toolchain install
+  rustup show active-toolchain
+}
+
+install_mise() {
+  command -v mise >/dev/null && return
+  curl -fsSL https://mise.run | MISE_QUIET=1 sh
+}
+
+install_mise_tools() {
+  mise trust --quiet mise.toml
+  mise install
+  mise reshim
+}
+
+persist_path() {
+  # Non-interactive login shells (Amp, orb services) read ~/.bash_profile.
+  local marker="# kubemu toolchains (rustup, mise shims)"
+  grep -Fqx "$marker" "$HOME/.bash_profile" 2>/dev/null && return
+  cat >>"$HOME/.bash_profile" <<'EOF'
+
+# kubemu toolchains (rustup, mise shims)
+export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$HOME/.local/share/mise/shims:$PATH"
+EOF
+}
+
+# Building the Go harnesses (k8s client-go) from a cold Go build cache takes
+# minutes; prebuild them so the cache lands in the snapshot. The oracle output
+# matches the oracle-build task.
+go_deps() {
+  (cd testing/oracle-go && go mod download && go build -o ../../target/oracle-go .)
+  (cd testing/informer-go && go mod download && go build -o /dev/null .)
+}
+
+# Prebuild what agents run most (`cargo test`, clippy, the CLI) so the first
+# check in a new orb is incremental. Cargo skips this quickly when up to date.
+warm_cargo() {
+  cargo fetch --locked
+  cargo test --workspace --no-run --locked -q
+  cargo clippy --workspace --all-targets --locked -q
+}
+
+step "rustup" install_rustup
+step "rust toolchain" install_rust_toolchain
+step "mise" install_mise
+step "mise tools" install_mise_tools
+step "persist PATH" persist_path
+step "go modules" go_deps
+step "cargo warm build" warm_cargo
